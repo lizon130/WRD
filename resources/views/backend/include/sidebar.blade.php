@@ -34,12 +34,12 @@
                 </a>
                 @endif
 
-                @if (Helper::hasRight('setting.view'))
+                {{-- @if (Helper::hasRight('setting.view'))
                 <a class="nav-link {{ Route::is('dashboard.summary') ? 'active' : '' }}"
                     href="{{ route('dashboard.summary') }}" href="{{ route('dashboard.summary') }}">
                     <div class="fas fa-chart-bar"><i class="fas fa-file-lines"></i></div> Dashboard Summary
                 </a>
-                @endif
+                @endif --}}
 
                 @if (Helper::hasRight('washDashboard.view'))
                 <a class="nav-link {{ Route::is('admin.rdbReport') ? 'active' : '' }}"

@@ -148,6 +148,57 @@
             color: #6c757d;
         }
 
+        /* Skeleton shimmer loading */
+        @keyframes rdbShimmer {
+            0% { background-position: -400px 0; }
+            100% { background-position: 400px 0; }
+        }
+
+        .rdb-skeleton-cell {
+            display: inline-block;
+            height: 12px;
+            border-radius: 6px;
+            background: linear-gradient(90deg, #eef0f4 25%, #f7f9fc 50%, #eef0f4 75%);
+            background-size: 800px 100%;
+            animation: rdbShimmer 1.3s infinite linear;
+        }
+
+        .rdb-table tbody tr.rdb-skeleton-row td {
+            height: 38px;
+            padding: 12px 10px;
+        }
+
+        /* Indeterminate progress bar */
+        @keyframes rdbSlide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(350%); }
+        }
+
+        .rdb-progress {
+            height: 3px;
+            background: #e3e8f0;
+            overflow: hidden;
+        }
+
+        .rdb-progress span {
+            display: block;
+            height: 100%;
+            width: 35%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #2d5da8, #6b9ae0);
+            animation: rdbSlide 1.1s ease-in-out infinite;
+        }
+
+        /* Staggered fade-in for data rows */
+        @keyframes rdbFadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .rdb-table tbody tr.rdb-fade-in {
+            animation: rdbFadeIn .3s ease both;
+        }
+
         .rdb-table-wrap {
             max-height: 68vh;
             overflow: auto;
@@ -295,6 +346,7 @@
                     </div>
                 </div>
             </div>
+            <div class="rdb-progress d-none" id="rdbProgress"><span></span></div>
             <div class="rdb-table-wrap">
                 <table class="table rdb-table mb-0" id="rdbTable">
                     <thead id="rdbTableHead">
@@ -400,13 +452,41 @@
                     '</tr><tr>' + units + '</tr>';
             }
 
-            function loadingRow(msg, isError) {
+            function messageRow(msg, isError) {
                 const colspan = rdbType === 'year' ? 19 : 22;
                 const icon = isError ?
                     '<i class="fa-solid fa-triangle-exclamation me-2"></i>' :
-                    '<i class="fa-solid fa-spinner fa-spin me-2"></i>';
+                    '<i class="fa-regular fa-folder-open me-2"></i>';
                 const cls = isError ? 'rdb-loading text-danger' : 'rdb-loading';
                 return '<tr><td colspan="' + colspan + '" class="' + cls + '">' + icon + msg + '</td></tr>';
+            }
+
+            function skeletonRows() {
+                const cols = rdbType === 'year' ? 19 : 22;
+                const rows = rdbType === 'year' ? 12 : 16;
+                let html = '';
+                for (let r = 0; r < rows; r++) {
+                    html += '<tr class="rdb-skeleton-row">';
+                    for (let c = 0; c < cols; c++) {
+                        const w = c === 0 ? 60 : 45 + ((r * 7 + c * 13) % 45);
+                        html += '<td' + (c === 0 ? ' class="date-cell"' : '') +
+                            '><span class="rdb-skeleton-cell" style="width:' + w + '%"></span></td>';
+                    }
+                    html += '</tr>';
+                }
+                return html;
+            }
+
+            function setLoading(isLoading) {
+                $('#rdbProgress').toggleClass('d-none', !isLoading);
+                $('#rdbApplyBtn, #rdbRefreshBtn, #rdbExportPdfBtn').prop('disabled', isLoading);
+            }
+
+            function animateRows() {
+                $('#rdbTableBody tr').each(function(i) {
+                    $(this).css('animation-delay', Math.min(i * 18, 400) + 'ms')
+                        .addClass('rdb-fade-in');
+                });
             }
 
             /* ---------- Row builders ---------- */
@@ -472,7 +552,7 @@
                 });
 
                 if (!data.rows.length) {
-                    body = loadingRow('No data found for this year.');
+                    body = messageRow('No data found for this year.');
                 }
 
                 $('#rdbTableBody').html(body);
@@ -490,8 +570,9 @@
 
             function loadRdbData() {
                 $('#rdbTableHead').html(rdbType === 'year' ? yearlyHead() : monthlyHead());
-                $('#rdbTableBody').html(loadingRow('Loading data...'));
+                $('#rdbTableBody').html(skeletonRows());
                 $('#rdbTableFoot').html('');
+                setLoading(true);
 
                 $.ajax({
                     url: "{{ route('admin.rdb-report.get-data') }}",
@@ -503,11 +584,15 @@
                         } else {
                             renderMonthly(response);
                         }
+                        animateRows();
                     },
                     error: function(xhr) {
                         const msg = (xhr.responseJSON && xhr.responseJSON.error) ? xhr.responseJSON.error :
                             'Failed to load RDB report data.';
-                        $('#rdbTableBody').html(loadingRow(msg, true));
+                        $('#rdbTableBody').html(messageRow(msg, true));
+                    },
+                    complete: function() {
+                        setLoading(false);
                     }
                 });
             }
