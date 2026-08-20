@@ -41,6 +41,13 @@
                 </a>
                 @endif
 
+                @if (Helper::hasRight('washDashboard.view'))
+                <a class="nav-link {{ Route::is('admin.rdbReport') ? 'active' : '' }}"
+                    href="{{ route('admin.rdbReport') }}">
+                    <div class="sb-nav-link-icon"><i class="fa-solid fa-table-columns"></i></div> RDB Report
+                </a>
+                @endif
+
                 {{-- Setting --}}
                 {{-- @if (Helper::hasRight('setting.view'))
                     <a class="nav-link collapsed" href="#" data-bs-toggle="collapse" data-bs-target="#settingNav"

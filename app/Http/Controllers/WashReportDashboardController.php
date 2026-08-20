@@ -2225,6 +2225,454 @@ class WashReportDashboardController extends Controller
     }
 
     /**
+     * RDB Report Index page
+     */
+    public function rdbIndex()
+    {
+        return view('backend.rdb-report.index');
+    }
+
+    /**
+     * RDB Report data: date-wise Receive / Delivery / In Hand Balance
+     * for Unit-01, Unit-02, Unit-03, Unit-04, TWL and Total.
+     * Dates shown month-wise from day 1 up to today (till now).
+     * Same data source as the Wash Report Dashboard (SQL Server + WashReportEntry).
+     */
+    public function getRdbData(Request $request)
+    {
+        try {
+            $type = $request->input('type', 'month');
+
+            if ($type === 'year') {
+                $year = $request->input('year', now()->format('Y'));
+
+                return response()->json($this->buildRdbYearlyReportData($year));
+            }
+
+            $month = $request->input('month', now()->format('Y-m'));
+
+            return response()->json($this->buildRdbReportData($month));
+        } catch (\Exception $e) {
+            \Log::error('Error in getRdbData: ' . $e->getMessage());
+            return response()->json(['error' => 'Failed to load RDB report data.'], 500);
+        }
+    }
+
+    /**
+     * Build the RDB report data array (shared by JSON endpoint & PDF export)
+     */
+    private function buildRdbReportData($month)
+    {
+        try {
+            $monthStart = Carbon::parse($month . '-01')->startOfMonth();
+        } catch (\Exception $e) {
+            $monthStart = now()->startOfMonth();
+            $month = $monthStart->format('Y-m');
+        }
+
+            $today = now()->toDateString();
+            $start = $monthStart->toDateString();
+
+            // Day 1 to till now for the current month; full month for previous months
+            $end = $monthStart->copy()->endOfMonth()->toDateString();
+            if ($end > $today) {
+                $end = $today;
+            }
+            if ($end < $start) {
+                $end = $start;
+            }
+
+            $dates = $this->getDatesInRange($start, $end);
+
+            $rdbUnits = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5', 'Unit TWL'];
+
+            $denimUnit = new \stdClass();
+            $denimUnit->unitName = 'Unit 4 (Denim)';
+            $dyeingUnit = new \stdClass();
+            $dyeingUnit->unitName = 'Unit 4 (Dyeing)';
+
+            /*
+            | In Hand Balance logic:
+            | Opening = last stored in_hand_balance before the month starts.
+            | If a date has a stored value (WashReportEntry), use it.
+            | Otherwise carry forward: previous balance + Receive - Delivery.
+            */
+            $runningBalances = [];
+            foreach ($rdbUnits as $unitName) {
+                $lastEntry = WashReportEntry::where('unit', $unitName)
+                    ->where('date', '<', $start)
+                    ->whereNotNull('in_hand_balance')
+                    ->orderBy('date', 'desc')
+                    ->first();
+                $runningBalances[$unitName] = $lastEntry ? (int)$lastEntry->in_hand_balance : 0;
+            }
+
+            $balanceEntries = WashReportEntry::whereBetween('date', [$start, $end])
+                ->whereNotNull('in_hand_balance')
+                ->get()
+                ->groupBy(function ($entry) {
+                    return $entry->unit . '|' . Carbon::parse($entry->date)->format('Y-m-d');
+                });
+
+            $rows = [];
+
+            foreach ($dates as $dateStr) {
+                $receive = [];
+                $delivery = [];
+                $inHand = [];
+
+                foreach ($rdbUnits as $unitName) {
+                    if ($unitName === 'Unit 4') {
+                        // Unit 4 is combined internally: Denim + Dyeing
+                        $denimData = $this->getWashProductionDataForUnitAndDate($dateStr, $denimUnit);
+                        $dyeingData = $this->getWashProductionDataForUnitAndDate($dateStr, $dyeingUnit);
+
+                        $received = (int)($denimData['received'] ?? 0) + (int)($dyeingData['received'] ?? 0);
+                        $delivered = (int)($denimData['delivery'] ?? 0) + (int)($dyeingData['delivery'] ?? 0);
+                    } else {
+                        $unitObj = new \stdClass();
+                        $unitObj->unitName = $unitName;
+
+                        $washData = $this->getWashProductionDataForUnitAndDate($dateStr, $unitObj);
+
+                        $received = (int)($washData['received'] ?? 0);
+                        $delivered = (int)($washData['delivery'] ?? 0);
+                    }
+
+                    /*
+                    | NOTE: Key mapping is inverted in getWashProductionDataForUnitAndDate():
+                    | 'received' = "Send from Wash" process  -> actual Delivery
+                    | 'delivery' = "Received from Sewing"    -> actual Receive
+                    | The Wash Report Dashboard view swaps these when rendering,
+                    | so RDB Report does the same to stay consistent.
+                    */
+                    $receive[$unitName] = $delivered;
+                    $delivery[$unitName] = $received;
+
+                    $storedEntry = $balanceEntries->get($unitName . '|' . $dateStr)?->first();
+                    if ($storedEntry) {
+                        $runningBalances[$unitName] = (int)($storedEntry->in_hand_balance ?? 0);
+                    } else {
+                        $runningBalances[$unitName] = $runningBalances[$unitName] + $delivered - $received;
+                    }
+
+                    $inHand[$unitName] = $runningBalances[$unitName];
+                }
+
+                $receive['total'] = array_sum($receive);
+                $delivery['total'] = array_sum($delivery);
+                $inHand['total'] = array_sum($inHand);
+
+                $rows[] = [
+                    'date' => Carbon::parse($dateStr)->format('d-m-Y'),
+                    'receive' => $receive,
+                    'delivery' => $delivery,
+                    'in_hand' => $inHand,
+                ];
+            }
+
+            $unitKeys = array_merge($rdbUnits, ['total']);
+            $dayCount = max(1, count($rows));
+
+            $totals = ['receive' => array_fill_keys($unitKeys, 0), 'delivery' => array_fill_keys($unitKeys, 0), 'in_hand' => array_fill_keys($unitKeys, 0)];
+            $averages = ['receive' => array_fill_keys($unitKeys, 0), 'delivery' => array_fill_keys($unitKeys, 0), 'in_hand' => array_fill_keys($unitKeys, 0)];
+
+            foreach ($rows as $row) {
+                foreach ($unitKeys as $key) {
+                    $totals['receive'][$key] += (int)$row['receive'][$key];
+                    $totals['delivery'][$key] += (int)$row['delivery'][$key];
+                    // For In Hand Balance, keep the closing (latest date) balance in Total
+                    $totals['in_hand'][$key] = (int)$row['in_hand'][$key];
+                }
+            }
+
+            foreach ($unitKeys as $key) {
+                $averages['receive'][$key] = round($totals['receive'][$key] / $dayCount, 1);
+                $averages['delivery'][$key] = round($totals['delivery'][$key] / $dayCount, 1);
+                $averages['in_hand'][$key] = round($totals['in_hand'][$key] / $dayCount, 1);
+            }
+
+            return [
+                'type' => 'monthly',
+                'month' => $month,
+                'month_label' => $monthStart->format('F Y'),
+                'date_range' => Carbon::parse($start)->format('d-m-Y') . ' to ' . Carbon::parse($end)->format('d-m-Y'),
+                'days' => $dayCount,
+                'rows' => $rows,
+                'totals' => $totals,
+                'averages' => $averages,
+            ];
+    }
+
+    /**
+     * Build the yearly RDB report data array (shared by JSON endpoint & PDF export):
+     * month-wise Receive / Delivery totals with Avg per day, GRAND TOTAL and Avg per Month.
+     */
+    private function buildRdbYearlyReportData($year)
+    {
+        try {
+            $yearStart = Carbon::createFromDate((int)$year, 1, 1)->startOfYear();
+        } catch (\Exception $e) {
+            $yearStart = now()->startOfYear();
+        }
+        $year = $yearStart->format('Y');
+
+        $today = now()->toDateString();
+        $start = $yearStart->toDateString();
+        $end = $yearStart->copy()->endOfYear()->toDateString();
+        if ($end > $today) {
+            $end = $today;
+        }
+
+        $rdbUnits = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5', 'Unit TWL'];
+        $unitKeys = array_merge($rdbUnits, ['total']);
+
+        // Fetch the whole year in one query per unit (Unit 4 = Denim + Dyeing)
+        $unitData = [];
+        foreach ($rdbUnits as $unitName) {
+            if ($unitName === 'Unit 4') {
+                $denimUnit = new \stdClass();
+                $denimUnit->unitName = 'Unit 4 (Denim)';
+                $dyeingUnit = new \stdClass();
+                $dyeingUnit->unitName = 'Unit 4 (Dyeing)';
+
+                $unitData[$unitName] = $this->mergeRdbRangeMaps(
+                    $this->getWashProductionDataForUnitAndDateRange($start, $end, $denimUnit),
+                    $this->getWashProductionDataForUnitAndDateRange($start, $end, $dyeingUnit)
+                );
+            } else {
+                $unitObj = new \stdClass();
+                $unitObj->unitName = $unitName;
+
+                $unitData[$unitName] = $this->getWashProductionDataForUnitAndDateRange($start, $end, $unitObj);
+            }
+        }
+
+        $rows = [];
+        $monthsCount = 0;
+        $totalDays = 0;
+
+        for ($m = 1; $m <= 12; $m++) {
+            $monthStart = $yearStart->copy()->month($m)->startOfMonth();
+            $monthStartStr = $monthStart->toDateString();
+
+            if ($monthStartStr > $end) {
+                continue; // month not reached yet
+            }
+
+            $monthEndStr = $monthStart->copy()->endOfMonth()->toDateString();
+            if ($monthEndStr > $end) {
+                $monthEndStr = $end;
+            }
+
+            $receive = array_fill_keys($rdbUnits, 0);
+            $delivery = array_fill_keys($rdbUnits, 0);
+
+            foreach ($unitData as $unitName => $dateMap) {
+                foreach ($dateMap as $date => $vals) {
+                    if ($date >= $monthStartStr && $date <= $monthEndStr) {
+                        /*
+                        | NOTE: Key mapping is inverted (same as buildRdbReportData):
+                        | 'delivery' = "Received from Sewing" -> actual Receive
+                        | 'received' = "Send from Wash"       -> actual Delivery
+                        */
+                        $receive[$unitName] += (int)$vals['delivery'];
+                        $delivery[$unitName] += (int)$vals['received'];
+                    }
+                }
+            }
+
+            $receive['total'] = array_sum($receive);
+            $delivery['total'] = array_sum($delivery);
+
+            $days = $monthStart->diffInDays(Carbon::parse($monthEndStr)) + 1;
+
+            $rows[] = [
+                'month_label' => $monthStart->format('F'),
+                'days' => $days,
+                'receive' => $receive,
+                'delivery' => $delivery,
+                'avg_receive_per_day' => $days > 0 ? round($receive['total'] / $days, 1) : 0,
+                'avg_delivery_per_day' => $days > 0 ? round($delivery['total'] / $days, 1) : 0,
+                'remarks' => '',
+            ];
+
+            $monthsCount++;
+            $totalDays += $days;
+        }
+
+        $grandTotal = [
+            'receive' => array_fill_keys($unitKeys, 0),
+            'delivery' => array_fill_keys($unitKeys, 0),
+            'avg_receive_per_day' => 0,
+            'avg_delivery_per_day' => 0,
+        ];
+        $avgPerMonth = [
+            'receive' => array_fill_keys($unitKeys, 0),
+            'delivery' => array_fill_keys($unitKeys, 0),
+            'avg_receive_per_day' => 0,
+            'avg_delivery_per_day' => 0,
+        ];
+
+        $sumAvgRcv = 0;
+        $sumAvgDel = 0;
+
+        foreach ($rows as $row) {
+            foreach ($unitKeys as $key) {
+                $grandTotal['receive'][$key] += (int)$row['receive'][$key];
+                $grandTotal['delivery'][$key] += (int)$row['delivery'][$key];
+            }
+            $sumAvgRcv += $row['avg_receive_per_day'];
+            $sumAvgDel += $row['avg_delivery_per_day'];
+        }
+
+        $divisor = max(1, $monthsCount);
+
+        foreach ($unitKeys as $key) {
+            $avgPerMonth['receive'][$key] = round($grandTotal['receive'][$key] / $divisor, 1);
+            $avgPerMonth['delivery'][$key] = round($grandTotal['delivery'][$key] / $divisor, 1);
+        }
+
+        $grandTotal['avg_receive_per_day'] = $totalDays > 0 ? round($grandTotal['receive']['total'] / $totalDays, 1) : 0;
+        $grandTotal['avg_delivery_per_day'] = $totalDays > 0 ? round($grandTotal['delivery']['total'] / $totalDays, 1) : 0;
+        $avgPerMonth['avg_receive_per_day'] = round($sumAvgRcv / $divisor, 1);
+        $avgPerMonth['avg_delivery_per_day'] = round($sumAvgDel / $divisor, 1);
+
+        return [
+            'type' => 'yearly',
+            'year' => $year,
+            'year_label' => 'Year ' . $year,
+            'date_range' => Carbon::parse($start)->format('d-m-Y') . ' to ' . Carbon::parse($end)->format('d-m-Y'),
+            'months' => $monthsCount,
+            'days' => $totalDays,
+            'rows' => $rows,
+            'grand_total' => $grandTotal,
+            'avg_per_month' => $avgPerMonth,
+        ];
+    }
+
+    /**
+     * Get wash production receive/delivery sums per date for a unit over a date range (single query).
+     * Key semantics match getWashProductionDataForUnitAndDate():
+     * 'received' = "Send from Wash" -> actual Delivery, 'delivery' = "Received from Sewing" -> actual Receive.
+     */
+    private function getWashProductionDataForUnitAndDateRange($startDate, $endDate, $unit)
+    {
+        try {
+            $unitName = $unit->unitName;
+
+            $isUnit4Dyeing = str_contains($unitName, 'Unit 4 (Dyeing)') || str_contains($unitName, 'Unit 4 Dyeing');
+            $isUnit4Denim = str_contains($unitName, 'Unit 4 (Denim)') || str_contains($unitName, 'Unit 4 Denim');
+
+            $dbUnitName = ($isUnit4Dyeing || $isUnit4Denim) ? 'Unit 4' : $unitName;
+
+            $query = "
+            SELECT
+                wop.ProductionDate,
+                p.ProcessName,
+                WT.UD_WashType,
+                SUM(wop.Quantity) AS Quantity
+            FROM [TusukaExtreme].[dbo].[MA_WorkOrderProduction] wop
+            JOIN MA_WorkOrderItem woi ON wop.WorkOrderItemId = woi.RecId
+            JOIN MA_Process p ON wop.ProcessId = p.RecId
+            OUTER APPLY (
+                SELECT DISTINCT KI.UD_WashType
+                FROM TSK_WashWorkOrderItem TSK
+                JOIN MA_WorkOrderItem KI ON KI.RecId = TSK.DocketWorkOrderItemId
+                WHERE TSK.WashWorkOrderItemId = woi.RecId
+            ) WT
+            WHERE p.RecId IN (315, 316)
+            AND wop.ProductionDate BETWEEN ? AND ?
+            AND wop.UD_WashUnit = ?
+            GROUP BY wop.ProductionDate, p.ProcessName, WT.UD_WashType
+            ";
+
+            $rows = DB::connection('sqlsrv')->select($query, [$startDate, $endDate, $dbUnitName]);
+
+            $result = [];
+
+            foreach ($rows as $row) {
+                $date = Carbon::parse($row->ProductionDate)->format('Y-m-d');
+                $washType = $row->UD_WashType ?? null;
+                $quantity = (int)($row->Quantity ?? 0);
+
+                if (!isset($result[$date])) {
+                    $result[$date] = ['received' => 0, 'delivery' => 0];
+                }
+
+                $applies = true;
+                if ($isUnit4Dyeing) {
+                    $applies = ($washType === 'Over Dye');
+                } elseif ($isUnit4Denim) {
+                    $applies = ($washType !== 'Over Dye');
+                }
+
+                if ($applies) {
+                    if ($row->ProcessName === 'Send from Wash') {
+                        $result[$date]['received'] += $quantity;
+                    } elseif ($row->ProcessName === 'Received from Sewing') {
+                        $result[$date]['delivery'] += $quantity;
+                    }
+                }
+            }
+
+            return $result;
+        } catch (\Exception $e) {
+            \Log::error('SQL Server wash range data error for ' . $unit->unitName . ' (' . $startDate . ' to ' . $endDate . '): ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * Merge two date => ['received','delivery'] maps (used to combine Unit 4 Denim + Dyeing)
+     */
+    private function mergeRdbRangeMaps(array $mapA, array $mapB)
+    {
+        $merged = $mapA;
+
+        foreach ($mapB as $date => $vals) {
+            if (!isset($merged[$date])) {
+                $merged[$date] = ['received' => 0, 'delivery' => 0];
+            }
+            $merged[$date]['received'] += (int)$vals['received'];
+            $merged[$date]['delivery'] += (int)$vals['delivery'];
+        }
+
+        return $merged;
+    }
+
+    /**
+     * Download RDB Report as PDF (month-wise or year-wise)
+     */
+    public function rdbDownloadPdf(Request $request)
+    {
+        try {
+            $type = $request->input('type', 'month');
+
+            if ($type === 'year') {
+                $year = $request->input('year', now()->format('Y'));
+                $data = $this->buildRdbYearlyReportData($year);
+                $filename = 'RDB_Report_Yearly_' . $data['year'] . '.pdf';
+            } else {
+                $month = $request->input('month', now()->format('Y-m'));
+                $data = $this->buildRdbReportData($month);
+                $filename = 'RDB_Report_' . Carbon::parse($data['month'] . '-01')->format('M-Y') . '.pdf';
+            }
+
+            $pdf = Pdf::loadView('backend.rdb-report.pdf', ['data' => $data]);
+            $pdf->setPaper('A4', 'landscape');
+
+            return $pdf->download($filename);
+        } catch (\Exception $e) {
+            \Log::error('RDB PDF Generation Error: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Error generating PDF: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
      * Save a new remark for a unit on a specific date
      */
     public function saveRemark(Request $request)

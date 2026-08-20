@@ -198,6 +198,13 @@ Route::group(['prefix' => 'admin', 'middleware' => 'auth'], function () {
         Route::get('/generate-pdf', [DashboardSummeryController::class, 'generatePdf'])->name('dashboard.summary.generate-pdf');
     });
 
+    // RDB Report Routes (date-wise Receive / Delivery / In Hand Balance)
+    Route::group(['prefix' => 'rdb-report'], function () {
+        Route::get('/', [WashReportDashboardController::class, 'rdbIndex'])->name('admin.rdbReport');
+        Route::get('/get-data', [WashReportDashboardController::class, 'getRdbData'])->name('admin.rdb-report.get-data');
+        Route::get('/download-pdf', [WashReportDashboardController::class, 'rdbDownloadPdf'])->name('admin.rdb-report.download-pdf');
+    });
+
 
     // Games
 
