@@ -44,7 +44,7 @@
 
         /* ================= Left Brand Panel ================= */
         .auth-brand {
-            flex: 0 0 48%;
+            flex: 0 0 70%;
             position: relative;
             display: flex;
             flex-direction: column;
