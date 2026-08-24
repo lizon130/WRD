@@ -203,6 +203,8 @@ Route::group(['prefix' => 'admin', 'middleware' => 'auth'], function () {
         Route::get('/', [WashReportDashboardController::class, 'rdbIndex'])->name('admin.rdbReport');
         Route::get('/get-data', [WashReportDashboardController::class, 'getRdbData'])->name('admin.rdb-report.get-data');
         Route::get('/download-pdf', [WashReportDashboardController::class, 'rdbDownloadPdf'])->name('admin.rdb-report.download-pdf');
+        Route::get('/calendar', [WashReportDashboardController::class, 'getRdbCalendar'])->name('admin.rdb-report.calendar');
+        Route::post('/calendar/save', [WashReportDashboardController::class, 'saveRdbCalendar'])->name('admin.rdb-report.calendar-save');
     });
 
 

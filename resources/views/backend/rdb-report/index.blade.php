@@ -258,6 +258,77 @@
             border-color: #2d5da8;
             box-shadow: 0 0 0 0.2rem rgba(45, 93, 168, 0.15);
         }
+
+        /* ---------- Off-day (RDB Calendar) styles ---------- */
+        .rdb-table .off-cell {
+            background: #fff4f4 !important;
+            color: #b91c1c;
+        }
+
+        .rdb-table .off-cell-d {
+            background: #fff8ec !important;
+            color: #b45309;
+        }
+
+        .rdb-off-flag {
+            display: inline-block;
+            margin-left: 4px;
+            font-size: 0.62rem;
+            font-weight: 800;
+            padding: 1px 5px;
+            border-radius: 6px;
+            vertical-align: middle;
+            line-height: 1.4;
+        }
+
+        .rdb-off-flag.r {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .rdb-off-flag.d {
+            background: #ffedd5;
+            color: #b45309;
+        }
+
+        .cal-day-card {
+            border: 1px solid #e3e8f0;
+            border-radius: 10px;
+            padding: 8px 10px;
+            background: #fff;
+            transition: box-shadow .15s ease;
+        }
+
+        .cal-day-card:hover {
+            box-shadow: 0 3px 10px rgba(31, 59, 115, 0.12);
+        }
+
+        .cal-day-card.weekend .cal-day-no {
+            color: #64748b;
+        }
+
+        .cal-toggle {
+            min-width: 30px;
+            font-size: 0.7rem;
+            font-weight: 800;
+            border-radius: 7px;
+            padding: 2px 6px;
+            border: 1px solid #d8dee9;
+            background: #f4f6fa;
+            color: #94a3b8;
+        }
+
+        .cal-toggle.active[data-sec="receive"] {
+            background: #dc2626;
+            border-color: #dc2626;
+            color: #fff;
+        }
+
+        .cal-toggle.active[data-sec="delivery"] {
+            background: #ea580c;
+            border-color: #ea580c;
+            color: #fff;
+        }
     </style>
 
     <div class="container-fluid px-4">
@@ -276,6 +347,14 @@
                     <div class="rdb-stat-badge">
                         <i class="fa-solid fa-clock text-info"></i>
                         <span id="rdbDateRange">--</span>
+                    </div>
+                    <div class="rdb-stat-badge">
+                        <i class="fa-solid fa-inbox text-success"></i>
+                        <span id="rdbRcvWorking">Rcv Working: --</span>
+                    </div>
+                    <div class="rdb-stat-badge">
+                        <i class="fa-solid fa-truck-fast text-warning"></i>
+                        <span id="rdbDelWorking">Del Working: --</span>
                     </div>
                 </div>
             </div>
@@ -340,6 +419,10 @@
                         <button type="button" class="btn btn-light btn-sm" id="rdbRefreshBtn">
                             <i class="fa-solid fa-rotate me-1"></i> Refresh
                         </button>
+                        <button type="button" class="btn btn-light btn-sm" id="rdbCalendarBtn"
+                            title="Mark Receive / Delivery off days">
+                            <i class="fa-solid fa-calendar-xmark me-1 text-danger"></i> RDB Calendar
+                        </button>
                         <button type="button" class="btn btn-light btn-sm" id="rdbExportPdfBtn">
                             <i class="fa-solid fa-file-pdf me-1 text-danger"></i> Export PDF
                         </button>
@@ -389,6 +472,70 @@
                     </tbody>
                     <tfoot id="rdbTableFoot"></tfoot>
                 </table>
+            </div>
+        </div>
+
+        <!-- RDB Calendar Modal (Receive / Delivery off days) -->
+        <div class="modal fade" id="rdbCalendarModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content" style="border-radius: 14px; overflow: hidden;">
+                    <div class="modal-header rdb-header" style="border-radius: 0;">
+                        <h5 class="modal-title fw-bold">
+                            <i class="fa-solid fa-calendar-xmark me-2"></i> RDB Calendar — Off Days
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
+                            aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row g-3 align-items-end mb-3">
+                            <div class="col-md-3">
+                                <label for="rdbCalMonth" class="form-label fw-semibold mb-1">
+                                    <i class="fa-regular fa-calendar me-1 text-primary"></i> Month
+                                </label>
+                                <input type="month" class="form-control rdb-month-input" id="rdbCalMonth">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="rdbCalReason" class="form-label fw-semibold mb-1">
+                                    <i class="fa-solid fa-note-sticky me-1 text-primary"></i> Reason (optional)
+                                </label>
+                                <input type="text" class="form-control" id="rdbCalReason"
+                                    placeholder="e.g. Eid Holiday, Maintenance Shutdown">
+                            </div>
+                            <div class="col-md-5 text-md-end">
+                                <button type="button" class="btn btn-outline-secondary btn-sm me-1 mb-1"
+                                    id="rdbCalWeekendBtn" title="Mark all Fridays off for both sections">
+                                    <i class="fa-solid fa-calendar-week me-1"></i> Fridays Off (Both)
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm mb-1"
+                                    id="rdbCalClearBtn">
+                                    <i class="fa-solid fa-eraser me-1"></i> Clear All
+                                </button>
+                            </div>
+                        </div>
+                        <div class="d-flex flex-wrap gap-3 mb-3 small align-items-center">
+                            <span>
+                                <span class="badge" style="background:#dc2626;">R</span>
+                                <strong>Receive</strong> Off Day
+                            </span>
+                            <span>
+                                <span class="badge" style="background:#ea580c;">D</span>
+                                <strong>Delivery</strong> Off Day
+                            </span>
+                            <span class="text-muted">
+                                <i class="fa-solid fa-circle-info me-1"></i>
+                                Click R / D on a date to toggle. AVG is calculated on working days only.
+                            </span>
+                        </div>
+                        <div class="row g-2" id="rdbCalGrid"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <span class="me-auto small text-muted" id="rdbCalSummary"></span>
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                        <button type="button" class="btn rdb-btn-primary" id="rdbCalSaveBtn">
+                            <i class="fa-solid fa-floppy-disk me-1"></i> Save Calendar
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -490,14 +637,23 @@
             }
 
             /* ---------- Row builders ---------- */
-            function buildMonthlyRow(label, receive, delivery, inHand, cssClass, hideInHand) {
+            function offFlags(rOff, dOff) {
+                let html = '';
+                if (rOff) html += '<span class="rdb-off-flag r" title="Receive off day">R</span>';
+                if (dOff) html += '<span class="rdb-off-flag d" title="Delivery off day">D</span>';
+                return html;
+            }
+
+            function buildMonthlyRow(label, receive, delivery, inHand, cssClass, hideInHand, rOff, dOff) {
                 let html = '<tr' + (cssClass ? ' class="' + cssClass + '"' : '') + '>' +
-                    '<td class="date-cell">' + label + '</td>';
+                    '<td class="date-cell">' + label + offFlags(rOff, dOff) + '</td>';
 
                 [receive, delivery, inHand].forEach((group, groupIndex) => {
+                    const isOffCell = (groupIndex === 0 && rOff) || (groupIndex === 1 && dOff);
                     unitKeys.forEach(key => {
                         const cls = (groupIndex > 0 ? 'group-sep' : '') +
-                            (key === 'total' ? ' total-col' : '');
+                            (key === 'total' ? ' total-col' : '') +
+                            (isOffCell ? (groupIndex === 0 ? ' off-cell' : ' off-cell-d') : '');
                         const value = (hideInHand && groupIndex === 2) ? '' : formatNumber(group[key]);
                         html += '<td class="' + cls.trim() + '">' + value + '</td>';
                     });
@@ -526,22 +682,25 @@
             function renderMonthly(data) {
                 let body = '';
                 data.rows.forEach(row => {
-                    body += buildMonthlyRow(row.date, row.receive, row.delivery, row.in_hand, '');
+                    body += buildMonthlyRow(row.date, row.receive, row.delivery, row.in_hand, '',
+                        false, row.receive_off, row.delivery_off);
                 });
 
                 if (!data.rows.length) {
-                    body = loadingRow('No data found for this month.');
+                    body = messageRow('No data found for this month.');
                 }
 
                 $('#rdbTableBody').html(body);
 
                 let foot = '';
                 foot += buildMonthlyRow('Total', data.totals.receive, data.totals.delivery, data.totals.in_hand, '', true);
-                foot += buildMonthlyRow('Avg', data.averages.receive, data.averages.delivery, data.averages.in_hand, 'avg-row', true);
+                foot += buildMonthlyRow('Avg (Working Days)', data.averages.receive, data.averages.delivery, data.averages.in_hand, 'avg-row', true);
                 $('#rdbTableFoot').html(foot);
 
                 $('#rdbMonthLabel').text(data.month_label);
                 $('#rdbDateRange').text(data.date_range + ' (' + data.days + ' days)');
+                $('#rdbRcvWorking').text('Rcv Working: ' + (data.receive_working_days ?? data.days) + ' days');
+                $('#rdbDelWorking').text('Del Working: ' + (data.delivery_working_days ?? data.days) + ' days');
             }
 
             function renderYearly(data) {
@@ -566,6 +725,8 @@
 
                 $('#rdbMonthLabel').text(data.year_label);
                 $('#rdbDateRange').text(data.date_range + ' (' + data.months + ' months)');
+                $('#rdbRcvWorking').text('Rcv Working: ' + (data.receive_working_days ?? data.days) + ' days');
+                $('#rdbDelWorking').text('Del Working: ' + (data.delivery_working_days ?? data.days) + ' days');
             }
 
             function loadRdbData() {
@@ -666,6 +827,169 @@
                     }
                 });
             });
+
+            /* ---------- RDB Calendar (off days) ---------- */
+            let calMonthDays = []; // [{date, dayNo, dayName, weekend}]
+            let calReceiveOff = new Set();
+            let calDeliveryOff = new Set();
+
+            function calCurrentMonth() {
+                return $('#rdbCalMonth').val() || new Date().toISOString().slice(0, 7);
+            }
+
+            function openRdbCalendar() {
+                // Default month = currently selected report month (or current month in year view)
+                const m = rdbType === 'year'
+                    ? (new Date().toISOString().slice(0, 7))
+                    : ($('#rdbMonth').val() || new Date().toISOString().slice(0, 7));
+                $('#rdbCalMonth').val(m);
+                $('#rdbCalendarModal').modal('show');
+                loadRdbCalendar();
+            }
+
+            function loadRdbCalendar() {
+                const month = calCurrentMonth();
+                $('#rdbCalGrid').html(
+                    '<div class="col-12 text-center text-muted py-4">' +
+                    '<i class="fa-solid fa-spinner fa-spin me-2"></i>Loading calendar...</div>'
+                );
+                $('#rdbCalSummary').text('');
+
+                $.ajax({
+                    url: "{{ route('admin.rdb-report.calendar') }}",
+                    type: 'GET',
+                    data: { month: month },
+                    success: function(res) {
+                        renderCalendarGrid(res);
+                    },
+                    error: function() {
+                        $('#rdbCalGrid').html(
+                            '<div class="col-12 text-center text-danger py-4">' +
+                            '<i class="fa-solid fa-triangle-exclamation me-2"></i>Failed to load calendar.</div>'
+                        );
+                    }
+                });
+            }
+
+            function renderCalendarGrid(res) {
+                calReceiveOff = new Set(Object.keys(res.receive || {}));
+                calDeliveryOff = new Set(Object.keys(res.delivery || {}));
+
+                const parts = res.month.split('-');
+                const y = parseInt(parts[0], 10);
+                const m = parseInt(parts[1], 10); // 1-based
+                const daysInMonth = new Date(y, m, 0).getDate();
+                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+                calMonthDays = [];
+                let html = '';
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const dateStr = res.month + '-' + String(d).padStart(2, '0');
+                    const dow = new Date(y, m - 1, d).getDay();
+                    const weekend = (dow === 5); // Friday weekend in BD
+                    calMonthDays.push({ date: dateStr, dayNo: d, dayName: dayNames[dow], weekend: weekend });
+
+                    html += '<div class="col-6 col-sm-4 col-md-3 col-lg-2">' +
+                        '<div class="cal-day-card' + (weekend ? ' weekend' : '') + '" data-date="' + dateStr + '">' +
+                        '<div class="d-flex justify-content-between align-items-center">' +
+                        '<div>' +
+                        '<div class="fw-bold cal-day-no">' + String(d).padStart(2, '0') + '</div>' +
+                        '<div class="small text-muted">' + dayNames[dow] + '</div>' +
+                        '</div>' +
+                        '<div class="d-flex gap-1">' +
+                        '<button type="button" class="btn cal-toggle" data-sec="receive" data-date="' + dateStr + '" title="Toggle Receive off">R</button>' +
+                        '<button type="button" class="btn cal-toggle" data-sec="delivery" data-date="' + dateStr + '" title="Toggle Delivery off">D</button>' +
+                        '</div>' +
+                        '</div>' +
+                        '</div>' +
+                        '</div>';
+                }
+
+                $('#rdbCalGrid').html(html);
+                refreshCalToggles();
+            }
+
+            function refreshCalToggles() {
+                $('#rdbCalGrid .cal-toggle').each(function() {
+                    const sec = $(this).data('sec');
+                    const date = $(this).data('date');
+                    const set = sec === 'receive' ? calReceiveOff : calDeliveryOff;
+                    $(this).toggleClass('active', set.has(date));
+                });
+                $('#rdbCalSummary').text(
+                    'Receive off: ' + calReceiveOff.size + ' day(s)  |  Delivery off: ' + calDeliveryOff.size + ' day(s)'
+                );
+            }
+
+            function saveRdbCalendar() {
+                const btn = $('#rdbCalSaveBtn');
+                btn.prop('disabled', true)
+                    .html('<i class="fa-solid fa-spinner fa-spin me-1"></i> Saving...');
+
+                $.ajax({
+                    url: "{{ route('admin.rdb-report.calendar-save') }}",
+                    type: 'POST',
+                    headers: {
+                        'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
+                    },
+                    data: {
+                        month: calCurrentMonth(),
+                        receive_off_dates: Array.from(calReceiveOff),
+                        delivery_off_dates: Array.from(calDeliveryOff),
+                        reason: $('#rdbCalReason').val()
+                    },
+                    success: function(res) {
+                        if (res.success) {
+                            $('#rdbCalendarModal').modal('hide');
+                            loadRdbData(); // refresh report with new working-day averages
+                        } else {
+                            alert(res.message || 'Failed to save calendar.');
+                        }
+                    },
+                    error: function(xhr) {
+                        const msg = (xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message :
+                            'Failed to save calendar.';
+                        alert(msg);
+                    },
+                    complete: function() {
+                        btn.prop('disabled', false)
+                            .html('<i class="fa-solid fa-floppy-disk me-1"></i> Save Calendar');
+                    }
+                });
+            }
+
+            $('#rdbCalendarBtn').on('click', openRdbCalendar);
+            $('#rdbCalMonth').on('change', loadRdbCalendar);
+
+            $('#rdbCalGrid').on('click', '.cal-toggle', function() {
+                const sec = $(this).data('sec');
+                const date = $(this).data('date');
+                const set = sec === 'receive' ? calReceiveOff : calDeliveryOff;
+                if (set.has(date)) {
+                    set.delete(date);
+                } else {
+                    set.add(date);
+                }
+                refreshCalToggles();
+            });
+
+            $('#rdbCalWeekendBtn').on('click', function() {
+                calMonthDays.forEach(day => {
+                    if (day.weekend) {
+                        calReceiveOff.add(day.date);
+                        calDeliveryOff.add(day.date);
+                    }
+                });
+                refreshCalToggles();
+            });
+
+            $('#rdbCalClearBtn').on('click', function() {
+                calReceiveOff.clear();
+                calDeliveryOff.clear();
+                refreshCalToggles();
+            });
+
+            $('#rdbCalSaveBtn').on('click', saveRdbCalendar);
 
             // Initial load (current month, day 1 to till now)
             loadRdbData();

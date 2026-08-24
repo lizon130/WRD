@@ -192,6 +192,36 @@
             border-top: 0.5px solid #d1d5db;
             padding-top: 2px;
         }
+
+        /* ---------- Off-day (RDB Calendar) marks ---------- */
+        .data-table .off-cell {
+            background-color: #fdecec !important;
+            color: #b91c1c;
+        }
+
+        .data-table .off-cell-d {
+            background-color: #fef3e2 !important;
+            color: #b45309;
+        }
+
+        .off-flag-r {
+            color: #dc2626;
+            font-weight: bold;
+            font-size: 8px;
+        }
+
+        .off-flag-d {
+            color: #ea580c;
+            font-weight: bold;
+            font-size: 8px;
+        }
+
+        .legend {
+            font-size: 8px;
+            color: #6b7280;
+            margin-top: 4px;
+            margin-bottom: 0;
+        }
     </style>
 </head>
 
@@ -217,9 +247,13 @@
             </td>
             <td class="header-right">
                 @if ($isYearly)
-                    Period:<br>{{ $data['months'] }} Months
+                    Period:<br>{{ $data['months'] }} Months<br>
+                    Rcv Working: {{ $data['receive_working_days'] ?? $data['days'] }} days<br>
+                    Del Working: {{ $data['delivery_working_days'] ?? $data['days'] }} days
                 @else
-                    Period:<br>{{ $data['days'] }} Days
+                    Period:<br>{{ $data['days'] }} Days<br>
+                    Rcv Working: {{ $data['receive_working_days'] ?? $data['days'] }} days<br>
+                    Del Working: {{ $data['delivery_working_days'] ?? $data['days'] }} days
                 @endif
             </td>
         </tr>
@@ -297,6 +331,10 @@
             </tfoot>
         </table>
 
+        <p class="legend">
+            AVG per day (Receive / Delivery) is calculated on working days only (RDB Calendar off days excluded).
+        </p>
+
         @if (count($data['rows']) === 0)
             <p style="text-align: center; color: #999; margin-top: 15px;">No data found for this year.</p>
         @endif
@@ -325,10 +363,15 @@
             <tbody>
                 @foreach ($data['rows'] as $row)
                     <tr>
-                        <td class="date-cell">{{ $row['date'] }}</td>
+                        <td class="date-cell">{{ $row['date'] }}@if (!empty($row['receive_off'])) <span class="off-flag-r">R</span>@endif @if (!empty($row['delivery_off'])) <span class="off-flag-d">D</span>@endif</td>
                         @foreach (['receive', 'delivery', 'in_hand'] as $gi => $groupKey)
+                            @php
+                                $offCls = '';
+                                if ($gi === 0 && !empty($row['receive_off'])) $offCls = 'off-cell';
+                                if ($gi === 1 && !empty($row['delivery_off'])) $offCls = 'off-cell-d';
+                            @endphp
                             @foreach ($unitKeys as $unitKey)
-                                <td class="{{ $gi > 0 ? 'group-sep ' : '' }}{{ $unitKey === 'total' ? 'total-col' : '' }}">
+                                <td class="{{ $gi > 0 ? 'group-sep ' : '' }}{{ $unitKey === 'total' ? 'total-col ' : '' }}{{ $offCls }}">
                                     {{ number_format((float) ($row[$groupKey][$unitKey] ?? 0)) }}
                                 </td>
                             @endforeach
@@ -348,7 +391,7 @@
                     @endforeach
                 </tr>
                 <tr class="avg-row">
-                    <td class="date-cell">Avg</td>
+                    <td class="date-cell">Avg (Working Days)</td>
                     @foreach (['receive', 'delivery', 'in_hand'] as $gi => $groupKey)
                         @foreach ($unitKeys as $unitKey)
                             <td @if ($gi > 0) class="group-sep" @endif>
@@ -359,6 +402,12 @@
                 </tr>
             </tfoot>
         </table>
+
+        <p class="legend">
+            <span class="off-flag-r">R</span> = Receive off day |
+            <span class="off-flag-d">D</span> = Delivery off day —
+            AVG (Receive / Delivery) is calculated on working days only (RDB Calendar off days excluded).
+        </p>
 
         @if (count($data['rows']) === 0)
             <p style="text-align: center; color: #999; margin-top: 15px;">No data found for this month.</p>

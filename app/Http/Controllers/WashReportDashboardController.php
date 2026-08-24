@@ -6,6 +6,7 @@ use App\Models\Dryer;
 use App\Models\DryProcessManual;
 use App\Models\DryProcessIE;
 use App\Models\MachineTransfer;
+use App\Models\RdbCalendar;
 use App\Models\SecondDryProcessEntry;
 use App\Models\Unit;
 use App\Models\WashReportEntry;
@@ -2259,7 +2260,143 @@ class WashReportDashboardController extends Controller
     }
 
     /**
+     * Get RDB calendar off-days for a month (Receive / Delivery separately)
+     */
+    public function getRdbCalendar(Request $request)
+    {
+        try {
+            $month = $request->input('month', now()->format('Y-m'));
+
+            try {
+                $monthStart = Carbon::parse($month . '-01')->startOfMonth();
+            } catch (\Exception $e) {
+                $monthStart = now()->startOfMonth();
+            }
+
+            $start = $monthStart->toDateString();
+            $end = $monthStart->copy()->endOfMonth()->toDateString();
+
+            $offDayMaps = $this->getRdbOffDayMaps($start, $end);
+
+            return response()->json([
+                'month' => $monthStart->format('Y-m'),
+                'month_label' => $monthStart->format('F Y'),
+                'receive' => $offDayMaps['receive'],  // ['Y-m-d' => reason]
+                'delivery' => $offDayMaps['delivery'], // ['Y-m-d' => reason]
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Error in getRdbCalendar: ' . $e->getMessage());
+            return response()->json(['error' => 'Failed to load RDB calendar.'], 500);
+        }
+    }
+
+    /**
+     * Save RDB calendar off-days for a month.
+     * Payload: month (Y-m), receive_off_dates: ['Y-m-d', ...], delivery_off_dates: ['Y-m-d', ...], reason (optional)
+     * Rows are synced: only off-day rows are kept in rdb_calendars.
+     */
+    public function saveRdbCalendar(Request $request)
+    {
+        try {
+            $request->validate([
+                'month' => 'required|date_format:Y-m',
+                'receive_off_dates' => 'nullable|array',
+                'delivery_off_dates' => 'nullable|array',
+                'receive_off_dates.*' => 'date_format:Y-m-d',
+                'delivery_off_dates.*' => 'date_format:Y-m-d',
+                'reason' => 'nullable|string|max:255',
+            ]);
+
+            $month = $request->input('month');
+            $monthStart = Carbon::parse($month . '-01')->startOfMonth();
+            $start = $monthStart->toDateString();
+            $end = $monthStart->copy()->endOfMonth()->toDateString();
+            $reason = $request->input('reason');
+
+            $sections = [
+                RdbCalendar::SECTION_RECEIVE => array_filter($request->input('receive_off_dates', []) ?: []),
+                RdbCalendar::SECTION_DELIVERY => array_filter($request->input('delivery_off_dates', []) ?: []),
+            ];
+
+            // Validate dates belong to the selected month & not in the future
+            $today = now()->toDateString();
+            foreach ($sections as $section => $dates) {
+                foreach ($dates as $date) {
+                    if ($date < $start || $date > $end) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Date ' . $date . ' does not belong to ' . $monthStart->format('F Y') . '.'
+                        ], 422);
+                    }
+                }
+            }
+
+            foreach ($sections as $section => $offDates) {
+                // Remove existing off-day rows of this section for the month (sync)
+                RdbCalendar::where('section_type', $section)
+                    ->whereBetween('calendar_date', [$start, $end])
+                    ->delete();
+
+                foreach (array_unique($offDates) as $date) {
+                    RdbCalendar::create([
+                        'calendar_date' => $date,
+                        'section_type' => $section,
+                        'is_working_day' => false,
+                        'reason' => $reason ?: ($date > $today ? 'Off day (scheduled)' : 'Off day'),
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'RDB calendar saved successfully.',
+                'receive_off_count' => count($sections[RdbCalendar::SECTION_RECEIVE]),
+                'delivery_off_count' => count($sections[RdbCalendar::SECTION_DELIVERY]),
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid data.',
+                'errors' => $e->errors()
+            ], 422);
+        } catch (\Exception $e) {
+            \Log::error('Error in saveRdbCalendar: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Failed to save RDB calendar.'], 500);
+        }
+    }
+
+    /**
+     * Off-day maps for Receive & Delivery within a date range.
+     * Returns: ['receive' => ['Y-m-d' => reason], 'delivery' => ['Y-m-d' => reason]]
+     */
+    private function getRdbOffDayMaps($startDate, $endDate)
+    {
+        $maps = [
+            'receive' => [],
+            'delivery' => [],
+        ];
+
+        try {
+            $rows = RdbCalendar::whereBetween('calendar_date', [$startDate, $endDate])
+                ->where('is_working_day', false)
+                ->whereIn('section_type', RdbCalendar::allowedSections())
+                ->get();
+
+            foreach ($rows as $row) {
+                $date = Carbon::parse($row->calendar_date)->format('Y-m-d');
+                $maps[$row->section_type][$date] = $row->reason ?: 'Off day';
+            }
+        } catch (\Exception $e) {
+            \Log::error('Error loading RDB calendar off days: ' . $e->getMessage());
+        }
+
+        return $maps;
+    }
+
+    /**
      * Build the RDB report data array (shared by JSON endpoint & PDF export)
+     * Averages for Receive / Delivery are calculated over working days only
+     * (dates marked as off in the RDB calendar are excluded per section).
      */
     private function buildRdbReportData($month)
     {
@@ -2284,12 +2421,20 @@ class WashReportDashboardController extends Controller
 
             $dates = $this->getDatesInRange($start, $end);
 
+            // RDB Calendar off days: Receive and Delivery have separate off days
+            $offDayMaps = $this->getRdbOffDayMaps($start, $end);
+
             $rdbUnits = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5', 'Unit TWL'];
 
-            $denimUnit = new \stdClass();
-            $denimUnit->unitName = 'Unit 4 (Denim)';
-            $dyeingUnit = new \stdClass();
-            $dyeingUnit->unitName = 'Unit 4 (Dyeing)';
+            /*
+            | PERFORMANCE: fetch receive/delivery for ALL units & ALL dates of the month
+            | in ONE SQL Server query upfront (was: 2 queries per unit per day => ~430 queries).
+            | Unit 4 = Denim + Dyeing combined (all wash types) inside the helper.
+            | Key mapping is inverted in the helper (same as before):
+            | 'received' = "Send from Wash" process  -> actual Delivery
+            | 'delivery' = "Received from Sewing"    -> actual Receive
+            */
+            $unitData = $this->getRdbUnitsProductionForDateRange($start, $end, $rdbUnits);
 
             /*
             | In Hand Balance logic:
@@ -2297,15 +2442,16 @@ class WashReportDashboardController extends Controller
             | If a date has a stored value (WashReportEntry), use it.
             | Otherwise carry forward: previous balance + Receive - Delivery.
             */
-            $runningBalances = [];
-            foreach ($rdbUnits as $unitName) {
-                $lastEntry = WashReportEntry::where('unit', $unitName)
-                    ->where('date', '<', $start)
-                    ->whereNotNull('in_hand_balance')
-                    ->orderBy('date', 'desc')
-                    ->first();
-                $runningBalances[$unitName] = $lastEntry ? (int)$lastEntry->in_hand_balance : 0;
-            }
+            $runningBalances = array_fill_keys($rdbUnits, 0);
+            WashReportEntry::whereIn('unit', $rdbUnits)
+                ->where('date', '<', $start)
+                ->whereNotNull('in_hand_balance')
+                ->orderBy('date', 'desc')
+                ->get()
+                ->groupBy('unit')
+                ->each(function ($entries, $unitName) use (&$runningBalances) {
+                    $runningBalances[$unitName] = (int)$entries->first()->in_hand_balance;
+                });
 
             $balanceEntries = WashReportEntry::whereBetween('date', [$start, $end])
                 ->whereNotNull('in_hand_balance')
@@ -2322,30 +2468,11 @@ class WashReportDashboardController extends Controller
                 $inHand = [];
 
                 foreach ($rdbUnits as $unitName) {
-                    if ($unitName === 'Unit 4') {
-                        // Unit 4 is combined internally: Denim + Dyeing
-                        $denimData = $this->getWashProductionDataForUnitAndDate($dateStr, $denimUnit);
-                        $dyeingData = $this->getWashProductionDataForUnitAndDate($dateStr, $dyeingUnit);
+                    $vals = $unitData[$unitName][$dateStr] ?? ['received' => 0, 'delivery' => 0];
 
-                        $received = (int)($denimData['received'] ?? 0) + (int)($dyeingData['received'] ?? 0);
-                        $delivered = (int)($denimData['delivery'] ?? 0) + (int)($dyeingData['delivery'] ?? 0);
-                    } else {
-                        $unitObj = new \stdClass();
-                        $unitObj->unitName = $unitName;
+                    $received = (int)$vals['received'];   // "Send from Wash" -> actual Delivery
+                    $delivered = (int)$vals['delivery'];  // "Received from Sewing" -> actual Receive
 
-                        $washData = $this->getWashProductionDataForUnitAndDate($dateStr, $unitObj);
-
-                        $received = (int)($washData['received'] ?? 0);
-                        $delivered = (int)($washData['delivery'] ?? 0);
-                    }
-
-                    /*
-                    | NOTE: Key mapping is inverted in getWashProductionDataForUnitAndDate():
-                    | 'received' = "Send from Wash" process  -> actual Delivery
-                    | 'delivery' = "Received from Sewing"    -> actual Receive
-                    | The Wash Report Dashboard view swaps these when rendering,
-                    | so RDB Report does the same to stay consistent.
-                    */
                     $receive[$unitName] = $delivered;
                     $delivery[$unitName] = $received;
 
@@ -2363,16 +2490,34 @@ class WashReportDashboardController extends Controller
                 $delivery['total'] = array_sum($delivery);
                 $inHand['total'] = array_sum($inHand);
 
+                $receiveOff = isset($offDayMaps['receive'][$dateStr]);
+                $deliveryOff = isset($offDayMaps['delivery'][$dateStr]);
+
                 $rows[] = [
                     'date' => Carbon::parse($dateStr)->format('d-m-Y'),
+                    'date_raw' => $dateStr,
                     'receive' => $receive,
                     'delivery' => $delivery,
                     'in_hand' => $inHand,
+                    'receive_off' => $receiveOff,
+                    'delivery_off' => $deliveryOff,
+                    'receive_off_reason' => $receiveOff ? $offDayMaps['receive'][$dateStr] : null,
+                    'delivery_off_reason' => $deliveryOff ? $offDayMaps['delivery'][$dateStr] : null,
                 ];
             }
 
             $unitKeys = array_merge($rdbUnits, ['total']);
             $dayCount = max(1, count($rows));
+
+            // Working day counts per section: off days are excluded from AVG
+            $receiveWorkingDays = 0;
+            $deliveryWorkingDays = 0;
+            foreach ($rows as $row) {
+                if (!$row['receive_off']) $receiveWorkingDays++;
+                if (!$row['delivery_off']) $deliveryWorkingDays++;
+            }
+            $receiveWorkingDays = max(1, $receiveWorkingDays);
+            $deliveryWorkingDays = max(1, $deliveryWorkingDays);
 
             $totals = ['receive' => array_fill_keys($unitKeys, 0), 'delivery' => array_fill_keys($unitKeys, 0), 'in_hand' => array_fill_keys($unitKeys, 0)];
             $averages = ['receive' => array_fill_keys($unitKeys, 0), 'delivery' => array_fill_keys($unitKeys, 0), 'in_hand' => array_fill_keys($unitKeys, 0)];
@@ -2387,8 +2532,9 @@ class WashReportDashboardController extends Controller
             }
 
             foreach ($unitKeys as $key) {
-                $averages['receive'][$key] = round($totals['receive'][$key] / $dayCount, 1);
-                $averages['delivery'][$key] = round($totals['delivery'][$key] / $dayCount, 1);
+                // AVG = Total / working days of that section (off days excluded)
+                $averages['receive'][$key] = round($totals['receive'][$key] / $receiveWorkingDays, 1);
+                $averages['delivery'][$key] = round($totals['delivery'][$key] / $deliveryWorkingDays, 1);
                 $averages['in_hand'][$key] = round($totals['in_hand'][$key] / $dayCount, 1);
             }
 
@@ -2398,6 +2544,10 @@ class WashReportDashboardController extends Controller
                 'month_label' => $monthStart->format('F Y'),
                 'date_range' => Carbon::parse($start)->format('d-m-Y') . ' to ' . Carbon::parse($end)->format('d-m-Y'),
                 'days' => $dayCount,
+                'receive_working_days' => $receiveWorkingDays,
+                'delivery_working_days' => $deliveryWorkingDays,
+                'receive_off_days' => $offDayMaps['receive'],
+                'delivery_off_days' => $offDayMaps['delivery'],
                 'rows' => $rows,
                 'totals' => $totals,
                 'averages' => $averages,
@@ -2427,30 +2577,18 @@ class WashReportDashboardController extends Controller
         $rdbUnits = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5', 'Unit TWL'];
         $unitKeys = array_merge($rdbUnits, ['total']);
 
-        // Fetch the whole year in one query per unit (Unit 4 = Denim + Dyeing)
-        $unitData = [];
-        foreach ($rdbUnits as $unitName) {
-            if ($unitName === 'Unit 4') {
-                $denimUnit = new \stdClass();
-                $denimUnit->unitName = 'Unit 4 (Denim)';
-                $dyeingUnit = new \stdClass();
-                $dyeingUnit->unitName = 'Unit 4 (Dyeing)';
+        // RDB Calendar off days for the whole year (Receive / Delivery separately)
+        $offDayMaps = $this->getRdbOffDayMaps($start, $end);
 
-                $unitData[$unitName] = $this->mergeRdbRangeMaps(
-                    $this->getWashProductionDataForUnitAndDateRange($start, $end, $denimUnit),
-                    $this->getWashProductionDataForUnitAndDateRange($start, $end, $dyeingUnit)
-                );
-            } else {
-                $unitObj = new \stdClass();
-                $unitObj->unitName = $unitName;
-
-                $unitData[$unitName] = $this->getWashProductionDataForUnitAndDateRange($start, $end, $unitObj);
-            }
-        }
+        // Fetch the whole year for ALL units in a single SQL Server query
+        // (Unit 4 = Denim + Dyeing combined => all wash types)
+        $unitData = $this->getRdbUnitsProductionForDateRange($start, $end, $rdbUnits);
 
         $rows = [];
         $monthsCount = 0;
         $totalDays = 0;
+        $totalReceiveWorkingDays = 0;
+        $totalDeliveryWorkingDays = 0;
 
         for ($m = 1; $m <= 12; $m++) {
             $monthStart = $yearStart->copy()->month($m)->startOfMonth();
@@ -2487,18 +2625,34 @@ class WashReportDashboardController extends Controller
 
             $days = $monthStart->diffInDays(Carbon::parse($monthEndStr)) + 1;
 
+            // Off days within this month per section -> working days for AVG
+            $receiveOffInMonth = 0;
+            $deliveryOffInMonth = 0;
+            foreach ($offDayMaps['receive'] as $offDate => $r) {
+                if ($offDate >= $monthStartStr && $offDate <= $monthEndStr) $receiveOffInMonth++;
+            }
+            foreach ($offDayMaps['delivery'] as $offDate => $r) {
+                if ($offDate >= $monthStartStr && $offDate <= $monthEndStr) $deliveryOffInMonth++;
+            }
+            $receiveWorkingDays = max(1, $days - $receiveOffInMonth);
+            $deliveryWorkingDays = max(1, $days - $deliveryOffInMonth);
+
             $rows[] = [
                 'month_label' => $monthStart->format('F'),
                 'days' => $days,
                 'receive' => $receive,
                 'delivery' => $delivery,
-                'avg_receive_per_day' => $days > 0 ? round($receive['total'] / $days, 1) : 0,
-                'avg_delivery_per_day' => $days > 0 ? round($delivery['total'] / $days, 1) : 0,
+                'avg_receive_per_day' => round($receive['total'] / $receiveWorkingDays, 1),
+                'avg_delivery_per_day' => round($delivery['total'] / $deliveryWorkingDays, 1),
+                'receive_working_days' => $receiveWorkingDays,
+                'delivery_working_days' => $deliveryWorkingDays,
                 'remarks' => '',
             ];
 
             $monthsCount++;
             $totalDays += $days;
+            $totalReceiveWorkingDays += $receiveWorkingDays;
+            $totalDeliveryWorkingDays += $deliveryWorkingDays;
         }
 
         $grandTotal = [
@@ -2533,8 +2687,8 @@ class WashReportDashboardController extends Controller
             $avgPerMonth['delivery'][$key] = round($grandTotal['delivery'][$key] / $divisor, 1);
         }
 
-        $grandTotal['avg_receive_per_day'] = $totalDays > 0 ? round($grandTotal['receive']['total'] / $totalDays, 1) : 0;
-        $grandTotal['avg_delivery_per_day'] = $totalDays > 0 ? round($grandTotal['delivery']['total'] / $totalDays, 1) : 0;
+        $grandTotal['avg_receive_per_day'] = $totalReceiveWorkingDays > 0 ? round($grandTotal['receive']['total'] / $totalReceiveWorkingDays, 1) : 0;
+        $grandTotal['avg_delivery_per_day'] = $totalDeliveryWorkingDays > 0 ? round($grandTotal['delivery']['total'] / $totalDeliveryWorkingDays, 1) : 0;
         $avgPerMonth['avg_receive_per_day'] = round($sumAvgRcv / $divisor, 1);
         $avgPerMonth['avg_delivery_per_day'] = round($sumAvgDel / $divisor, 1);
 
@@ -2545,6 +2699,10 @@ class WashReportDashboardController extends Controller
             'date_range' => Carbon::parse($start)->format('d-m-Y') . ' to ' . Carbon::parse($end)->format('d-m-Y'),
             'months' => $monthsCount,
             'days' => $totalDays,
+            'receive_working_days' => $totalReceiveWorkingDays,
+            'delivery_working_days' => $totalDeliveryWorkingDays,
+            'receive_off_days' => $offDayMaps['receive'],
+            'delivery_off_days' => $offDayMaps['delivery'],
             'rows' => $rows,
             'grand_total' => $grandTotal,
             'avg_per_month' => $avgPerMonth,
@@ -2552,22 +2710,24 @@ class WashReportDashboardController extends Controller
     }
 
     /**
-     * Get wash production receive/delivery sums per date for a unit over a date range (single query).
+     * Get wash production receive/delivery sums per unit per date over a whole date range
+     * for ALL units in a SINGLE SQL Server query.
+     * Replaces the old per-unit/per-day queries (400+ remote queries => 1 query).
      * Key semantics match getWashProductionDataForUnitAndDate():
      * 'received' = "Send from Wash" -> actual Delivery, 'delivery' = "Received from Sewing" -> actual Receive.
+     * Unit 4 = Denim + Dyeing combined, so ALL wash types are accumulated for it.
+     * Returns: ['Unit 1' => ['Y-m-d' => ['received' => int, 'delivery' => int]], ...]
      */
-    private function getWashProductionDataForUnitAndDateRange($startDate, $endDate, $unit)
+    private function getRdbUnitsProductionForDateRange($startDate, $endDate, array $unitNames)
     {
+        $result = array_fill_keys($unitNames, []);
+
         try {
-            $unitName = $unit->unitName;
-
-            $isUnit4Dyeing = str_contains($unitName, 'Unit 4 (Dyeing)') || str_contains($unitName, 'Unit 4 Dyeing');
-            $isUnit4Denim = str_contains($unitName, 'Unit 4 (Denim)') || str_contains($unitName, 'Unit 4 Denim');
-
-            $dbUnitName = ($isUnit4Dyeing || $isUnit4Denim) ? 'Unit 4' : $unitName;
+            $placeholders = implode(',', array_fill(0, count($unitNames), '?'));
 
             $query = "
             SELECT
+                wop.UD_WashUnit,
                 wop.ProductionDate,
                 p.ProcessName,
                 WT.UD_WashType,
@@ -2583,62 +2743,36 @@ class WashReportDashboardController extends Controller
             ) WT
             WHERE p.RecId IN (315, 316)
             AND wop.ProductionDate BETWEEN ? AND ?
-            AND wop.UD_WashUnit = ?
-            GROUP BY wop.ProductionDate, p.ProcessName, WT.UD_WashType
+            AND wop.UD_WashUnit IN ($placeholders)
+            GROUP BY wop.UD_WashUnit, wop.ProductionDate, p.ProcessName, WT.UD_WashType
             ";
 
-            $rows = DB::connection('sqlsrv')->select($query, [$startDate, $endDate, $dbUnitName]);
-
-            $result = [];
+            $rows = DB::connection('sqlsrv')->select($query, array_merge([$startDate, $endDate], $unitNames));
 
             foreach ($rows as $row) {
+                $unitName = $row->UD_WashUnit;
+                if (!isset($result[$unitName])) {
+                    continue;
+                }
+
                 $date = Carbon::parse($row->ProductionDate)->format('Y-m-d');
-                $washType = $row->UD_WashType ?? null;
                 $quantity = (int)($row->Quantity ?? 0);
 
-                if (!isset($result[$date])) {
-                    $result[$date] = ['received' => 0, 'delivery' => 0];
+                if (!isset($result[$unitName][$date])) {
+                    $result[$unitName][$date] = ['received' => 0, 'delivery' => 0];
                 }
 
-                $applies = true;
-                if ($isUnit4Dyeing) {
-                    $applies = ($washType === 'Over Dye');
-                } elseif ($isUnit4Denim) {
-                    $applies = ($washType !== 'Over Dye');
-                }
-
-                if ($applies) {
-                    if ($row->ProcessName === 'Send from Wash') {
-                        $result[$date]['received'] += $quantity;
-                    } elseif ($row->ProcessName === 'Received from Sewing') {
-                        $result[$date]['delivery'] += $quantity;
-                    }
+                if ($row->ProcessName === 'Send from Wash') {
+                    $result[$unitName][$date]['received'] += $quantity;
+                } elseif ($row->ProcessName === 'Received from Sewing') {
+                    $result[$unitName][$date]['delivery'] += $quantity;
                 }
             }
-
-            return $result;
         } catch (\Exception $e) {
-            \Log::error('SQL Server wash range data error for ' . $unit->unitName . ' (' . $startDate . ' to ' . $endDate . '): ' . $e->getMessage());
-            return [];
-        }
-    }
-
-    /**
-     * Merge two date => ['received','delivery'] maps (used to combine Unit 4 Denim + Dyeing)
-     */
-    private function mergeRdbRangeMaps(array $mapA, array $mapB)
-    {
-        $merged = $mapA;
-
-        foreach ($mapB as $date => $vals) {
-            if (!isset($merged[$date])) {
-                $merged[$date] = ['received' => 0, 'delivery' => 0];
-            }
-            $merged[$date]['received'] += (int)$vals['received'];
-            $merged[$date]['delivery'] += (int)$vals['delivery'];
+            \Log::error('SQL Server RDB units range data error (' . $startDate . ' to ' . $endDate . '): ' . $e->getMessage());
         }
 
-        return $merged;
+        return $result;
     }
 
     /**
