@@ -677,7 +677,7 @@
                     Manage your wash reports and services all in one place with the Tusuka Wash dashboard.
                 </p>
 
-                <img class="brand-illustration" src="{{ asset('assets/img/wrd.jpg') }}" alt="Laundry illustration">
+                <img class="brand-illustration" src="{{ asset('assets/wwd.png') }}" alt="Wash Tusuka illustration">
 
                 <ul class="brand-features">
                     <li><i class="fas fa-check"></i> Smart Report Management</li>
