@@ -10,17 +10,16 @@ class Kernel extends ConsoleKernel
     /**
      * Define the application's command schedule.
      *
-     * NOTE: The daily 11:00 Wash Report mail is NO LONGER scheduled here.
-     * It is fully managed by App\Jobs\SendWashReportJob - a self-rescheduling
-     * queue job. Just keep the queue worker running:
+     * Daily 11:00 AM (Asia/Dhaka) Wash Report mail - runs from the server via
+     * the standard cron entry (works 24/7, no IDE needed):
      *
-     *     php artisan queue:work --timeout=900
-     *
-     * No Windows Task Scheduler / cron entry is required.
+     *     * * * * * cd /var/www/html/wrd && php artisan schedule:run >> /dev/null 2>&1
      */
     protected function schedule(Schedule $schedule): void
     {
-        //
+        $schedule->command('report:send-wash --period=daily')
+            ->dailyAt('11:00')
+            ->timezone('Asia/Dhaka');
     }
 
     /**
