@@ -38,7 +38,9 @@ return [
             'driver' => 'database',
             'table' => 'jobs',
             'queue' => 'default',
-            'retry_after' => 90,
+            // Must be greater than the longest job timeout (SendWashReportJob = 900s),
+            // otherwise a still-running job gets picked up again and re-sends mail.
+            'retry_after' => 1800,
             'after_commit' => false,
         ],
 

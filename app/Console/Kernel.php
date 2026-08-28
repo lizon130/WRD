@@ -9,25 +9,22 @@ class Kernel extends ConsoleKernel
 {
     /**
      * Define the application's command schedule.
+     *
+     * NOTE: The daily 11:00 Wash Report mail is NO LONGER scheduled here.
+     * It is fully managed by App\Jobs\SendWashReportJob - a self-rescheduling
+     * queue job. Just keep the queue worker running:
+     *
+     *     php artisan queue:work --timeout=900
+     *
+     * No Windows Task Scheduler / cron entry is required.
      */
-
-
     protected function schedule(Schedule $schedule): void
     {
-
-        \Log::info('Scheduler running at: ' . now());
-
-        // TEST ENTRY - Runs every minute
-        //    $schedule->command('report:send-wash --period=daily')
-        //         ->everyMinute();
-
-
-            $schedule->command('report:send-wash --period=daily')
-                ->dailyAt('11:00');
-            }
+        //
+    }
 
     /**
-     * Register the commands for the application.artisan schedule:run
+     * Register the commands for the application.
      */
     protected function commands(): void
     {
