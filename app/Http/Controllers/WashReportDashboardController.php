@@ -3553,16 +3553,49 @@ class WashReportDashboardController extends Controller
             $cappResponse = $this->getCappMachineStatus($cappRequest);
             $cappData = $cappResponse->getData(true);
             $chartPath = null;
+            $machinePerfTotals = null;
 
             if (!empty($cappData['success'])) {
                 $labels = $cappData['chart_data']['labels'];
                 $downtimeData = $cappData['chart_data']['datasets'][0]['data'];
                 $idletimeData = $cappData['chart_data']['datasets'][1]['data'];
                 $uptimeData = $cappData['chart_data']['datasets'][2]['data'];
+
+                // All-units combined (average of per-unit percentages)
+                $perfRows = !empty($cappData['unit_data'])
+                    ? array_values($cappData['unit_data'])
+                    : [];
+                if (empty($perfRows)) {
+                    $perfRows = [
+                        ['uptime' => array_sum($uptimeData), 'idletime' => array_sum($idletimeData), 'downtime' => array_sum($downtimeData)],
+                    ];
+                }
+                $unitCountPerf = max(count($perfRows), 1);
+                $machinePerfTotals = [
+                    'uptime'    => round(array_sum(array_column($perfRows, 'uptime')) / $unitCountPerf, 2),
+                    'idletime'  => round(array_sum(array_column($perfRows, 'idletime')) / $unitCountPerf, 2),
+                    'downtime'  => round(array_sum(array_column($perfRows, 'downtime')) / $unitCountPerf, 2),
+                    'units'     => count($perfRows),
+                ];
+
                 try {
                     $chartPath = $this->generateLocalChart($labels, $downtimeData, $idletimeData, $uptimeData);
                 } catch (\Exception $e) {
                     \Log::error('Local chart generation failed: ' . $e->getMessage());
+                }
+            }
+
+            // Generate summary chart — same style as main chart but compact for one group
+            $summaryChartPath = null;
+            if (!empty($machinePerfTotals)) {
+                try {
+                    $summaryChartPath = $this->generateSummaryChart(
+                        $machinePerfTotals['downtime'],
+                        $machinePerfTotals['idletime'],
+                        $machinePerfTotals['uptime']
+                    );
+                } catch (\Exception $e) {
+                    \Log::error('Summary chart generation failed: ' . $e->getMessage());
                 }
             }
 
@@ -3581,7 +3614,9 @@ class WashReportDashboardController extends Controller
                 'transferTotals' => $transferTotals,
                 'dryerData' => $dryerData,
                 'dryerTotals' => $dryerTotals,
-                'chartPath' => $chartPath
+                'chartPath' => $chartPath,
+                'summaryChartPath' => $summaryChartPath,
+                'machinePerfTotals' => $machinePerfTotals
             ]);
 
             $pdf->setPaper('A4', 'landscape');
@@ -3595,6 +3630,10 @@ class WashReportDashboardController extends Controller
 
             if ($chartPath && file_exists($chartPath)) {
                 session(['last_chart_path' => $chartPath]);
+            }
+
+            if ($summaryChartPath && file_exists($summaryChartPath)) {
+                session(['last_summary_chart_path' => $summaryChartPath]);
             }
 
             return $pdfPath;
@@ -3635,6 +3674,12 @@ class WashReportDashboardController extends Controller
                 session()->forget('last_chart_path');
             }
 
+            $summaryChartPath = session('last_summary_chart_path');
+            if ($summaryChartPath && file_exists($summaryChartPath)) {
+                unlink($summaryChartPath);
+                session()->forget('last_summary_chart_path');
+            }
+
             $filename = 'Wash_Report_' . Carbon::parse($fromDate)->format('d-m-Y') . '_to_' .
                 Carbon::parse($toDate)->format('d-m-Y') . '.pdf';
 
@@ -3651,6 +3696,12 @@ class WashReportDashboardController extends Controller
                 session()->forget('last_chart_path');
             }
 
+            $summaryChartPath = session('last_summary_chart_path');
+            if ($summaryChartPath && file_exists($summaryChartPath)) {
+                unlink($summaryChartPath);
+                session()->forget('last_summary_chart_path');
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => 'Error generating PDF: ' . $e->getMessage()
@@ -3663,277 +3714,292 @@ class WashReportDashboardController extends Controller
      */
     public function generateLocalChart($labels, $downtimeData, $idletimeData, $uptimeData)
     {
-        $width = 1000;
-        $height = 250;
-        $padding = 50;
-        $bottomPadding = 50;
+        return $this->buildBarChart(
+            $labels, $downtimeData, $idletimeData, $uptimeData,
+            'Machine Performance', 'chart_'
+        );
+    }
 
-        $chartWidth = $width - (2 * $padding);
-        $chartHeight = $height - $padding - $bottomPadding;
+    /**
+     * Shared high-quality bar-chart builder.
+     * 2000×500 canvas (rendered at half-size in PDF), TTF fonts, dark theme.
+     *
+     * @param int|null $simulatedGroups  Force slot-count so bar width stays
+     *                                   consistent when only 1 label is drawn.
+     */
+    private function buildBarChart(
+        array  $labels,
+        array  $downtimeData,
+        array  $idletimeData,
+        array  $uptimeData,
+        string $title,
+        string $filePrefix,
+        ?int   $simulatedGroups = null
+    ): string {
+        // ── Canvas ──────────────────────────────────────────────────────────
+        $W  = 2000;
+        $H  = 600;
+        $pL = 130;   // left  (Y-axis labels)
+        $pR = 50;
+        $pT = 50;    // top   (legend only, no title)
+        $pB = 110;   // bottom (X-axis labels + breathing room)
 
+        $chartW  = $W - $pL - $pR;   // 1820
+        $chartH  = $H - $pT - $pB;   // 390
         $maxScale = 70;
 
-        $image = imagecreatetruecolor($width, $height);
-        imageantialias($image, true);
+        // ── TTF fonts ───────────────────────────────────────────────────────
+        $fontBold = base_path('vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf');
+        $fontReg  = base_path('vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf');
+        $ttf      = file_exists($fontBold) && function_exists('imagettftext');
 
-        // Colors
-        $white = imagecolorallocate($image, 255, 255, 255);
-        $black = imagecolorallocate($image, 0, 0, 0);
-        $gray = imagecolorallocate($image, 240, 240, 240);
-        $darkGray = imagecolorallocate($image, 150, 150, 150);
+        // ── Image ────────────────────────────────────────────────────────────
+        $img = imagecreatetruecolor($W, $H);
+        imageantialias($img, true);
 
-        $red = imagecolorallocate($image, 220, 53, 69);
-        $yellow = imagecolorallocate($image, 255, 193, 7);
-        $green = imagecolorallocate($image, 40, 167, 69);
-        $blue = imagecolorallocate($image, 0, 123, 255);
+        // Palette — light / white background theme
+        $bg       = imagecolorallocate($img, 255, 255, 255);  // white bg
+        $gridC    = imagecolorallocate($img, 220, 225, 232);  // light gray grid
+        $axisC    = imagecolorallocate($img, 160, 170, 185);  // mid gray axis
+        $labelC   = imagecolorallocate($img,  50,  60,  75);  // dark text
+        $titleC   = imagecolorallocate($img,  20,  40,  80);  // dark navy title
+        $valC     = imagecolorallocate($img,  20,  20,  20);  // near-black value labels
 
-        // Background
-        imagefill($image, 0, 0, $white);
+        $redD  = imagecolorallocate($img, 210,  45,  60);
+        $redL  = imagecolorallocate($img, 235, 100, 115);
+        $yelD  = imagecolorallocate($img, 210, 150,   0);
+        $yelL  = imagecolorallocate($img, 245, 195,  40);
+        $grnD  = imagecolorallocate($img,  25, 145,  65);
+        $grnL  = imagecolorallocate($img,  70, 195, 105);
 
-        // Title
-        $title = 'Machine Performance';
-        $titleX = ($width - (strlen($title) * imagefontwidth(4))) / 2;
-        imagestring($image, 4, $titleX, 5, $title, $blue);
+        imagefill($img, 0, 0, $bg);
 
-        // Border
-        imagerectangle($image, 1, 1, $width - 2, $height - 2, $darkGray);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Grid Lines
-        |--------------------------------------------------------------------------
-        */
-
+        // ── Grid lines ───────────────────────────────────────────────────────
         for ($i = 0; $i <= 5; $i++) {
+            $pct = ($i * $maxScale) / 5;
+            $y   = (int)($pT + $chartH - ($chartH * $pct / $maxScale));
+            imageline($img, $pL, $y, $pL + $chartW, $y, $gridC);
 
-            $percentage = ($i * $maxScale) / 5;
+            $yLbl = round($pct) . '%';
+            if ($ttf) {
+                $bx = imagettfbbox(14, 0, $fontReg, $yLbl);
+                $lw = abs($bx[4] - $bx[0]);
+                imagettftext($img, 14, 0, $pL - $lw - 12, $y + 6, $labelC, $fontReg, $yLbl);
+            } else {
+                imagestring($img, 3, 5, $y - 7, $yLbl, $labelC);
+            }
+        }
+        imageline($img, $pL, $pT, $pL, $pT + $chartH, $axisC);
+        imageline($img, $pL, $pT + $chartH, $pL + $chartW, $pT + $chartH, $axisC);
 
-            $y = $padding + ($chartHeight * (5 - $i) / 5);
+        // ── Bar layout ───────────────────────────────────────────────────────
+        $numGroups  = max(1, count($labels));
+        $totalSlots = $simulatedGroups ?? $numGroups;
+        $groupW     = $chartW / $totalSlots;
+        $slotW      = $groupW * 0.82;           // fatter slot
+        $barW       = (int)($slotW / 3.4);      // thicker individual bars
+        $barGap     = (int)($slotW * 0.04);     // small gap between bars
+        $baseY      = $pT + $chartH;
 
-            imageline($image, $padding - 5, $y, $width - $padding + 5, $y, $gray);
+        // Centre offset (for summary chart with 1 group in 5 slots)
+        $startSlot = (int)(($totalSlots - $numGroups) / 2);
 
-            imagestring($image, 2, 10, $y - 6, round($percentage) . '%', $black);
+        for ($i = 0; $i < $numGroups; $i++) {
+            $si     = $startSlot + $i;
+            $groupX = (int)($pL + $si * $groupW + ($groupW - $slotW) / 2);
+
+            // X-axis label
+            $lbl = $labels[$i] ?? '';
+            if ($ttf) {
+                $bx = imagettfbbox(15, 0, $fontReg, $lbl);
+                $lw = abs($bx[4] - $bx[0]);
+                imagettftext($img, 15, 0, (int)($groupX + $slotW / 2 - $lw / 2), $baseY + 58, $labelC, $fontReg, $lbl);
+            } else {
+                imagestring($img, 3, (int)($groupX + $slotW / 2 - strlen($lbl) * 3), $H - 40, $lbl, $labelC);
+            }
+
+            // draw one bar with a highlight strip on left edge
+            $drawBar = function (int $bx1, float $val, $cMain, $cLight) use (
+                $img, $barW, $baseY, $chartH, $maxScale, $ttf, $fontBold, $valC
+            ) {
+                if ($val <= 0) return;
+                $bh  = (int)(($val / $maxScale) * $chartH);
+                $by1 = $baseY - $bh;
+                $bx2 = $bx1 + $barW;
+                imagefilledrectangle($img, $bx1, $by1, $bx2, $baseY, $cMain);
+                imagefilledrectangle($img, $bx1, $by1, $bx1 + 5, $baseY, $cLight); // highlight
+
+                $vLbl = round($val, 1) . '%';
+                if ($ttf) {
+                    $vb = imagettfbbox(16, 0, $fontBold, $vLbl);
+                    $vw = abs($vb[4] - $vb[0]);
+                    imagettftext($img, 16, 0, (int)($bx1 + ($barW - $vw) / 2), $by1 - 10, $valC, $fontBold, $vLbl);
+                } else {
+                    imagestring($img, 2, $bx1, $by1 - 16, $vLbl, $valC);
+                }
+            };
+
+            $drawBar($groupX,                                  $downtimeData[$i] ?? 0, $redD, $redL);
+            $drawBar($groupX + $barW + $barGap,                $idletimeData[$i] ?? 0, $yelD, $yelL);
+            $drawBar($groupX + 2 * ($barW + $barGap),          $uptimeData[$i]   ?? 0, $grnD, $grnL);
         }
 
-        imageline(
-            $image,
-            $padding - 5,
-            $padding - 5,
-            $padding - 5,
-            $height - $bottomPadding + 5,
-            $black
-        );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Layout Settings
-        |--------------------------------------------------------------------------
-        */
-
-        $barGroups = max(1, count($labels));
-
-        $groupWidth = $chartWidth / $barGroups;
-
-        /*
-        ⭐ Each group has 3 bars → divide group space into 3 slots
-        */
-
-        $slotWidth = $groupWidth * 0.7;
-        $barWidth = $slotWidth / 3;
-
-        /*
-        Inside group gap between bars
-        */
-        $barGap = 6;
-
-        /*
-        |--------------------------------------------------------------------------
-        | Draw Bars
-        |--------------------------------------------------------------------------
-        */
-
-        for ($i = 0; $i < $barGroups; $i++) {
-
-            $groupX = $padding + ($i * $groupWidth) + ($groupWidth * 0.15);
-
-            $label = $labels[$i] ?? '';
-
-            /*
-            ----------------------
-            Center Unit Label
-            ----------------------
-            */
-
-            $labelTextWidth = strlen($label) * 3;
-
-            $labelX = $groupX + ($slotWidth / 2) - $labelTextWidth;
-
-            imagestring(
-                $image,
-                3,
-                $labelX,
-                $height - 30,
-                $label,
-                $black
-            );
-
-            /*
-            ===============================
-            Downtime Bar
-            ===============================
-            */
-
-            $baseY = $height - $bottomPadding;
-
-            $value = $downtimeData[$i] ?? 0;
-            $barHeight = ($value / $maxScale) * $chartHeight;
-
-            $x1 = $groupX;
-            $y1 = $baseY - $barHeight;
-
-            $x2 = $x1 + $barWidth;
-
-            imagefilledrectangle($image, $x1, $y1, $x2, $baseY, $red);
-
-            imagestring(
-                $image,
-                1,
-                $x1,
-                $y1 - 12,
-                round($value, 1) . '%',
-                $black
-            );
-
-            /*
-            ===============================
-            Idletime Bar
-            ===============================
-            */
-
-            $value = $idletimeData[$i] ?? 0;
-            $barHeight = ($value / $maxScale) * $chartHeight;
-
-            $x1 = $groupX + $barWidth + $barGap;
-            $y1 = $baseY - $barHeight;
-            $x2 = $x1 + $barWidth;
-
-            imagefilledrectangle($image, $x1, $y1, $x2, $baseY, $yellow);
-
-            imagestring(
-                $image,
-                1,
-                $x1,
-                $y1 - 12,
-                round($value, 1) . '%',
-                $black
-            );
-
-            /*
-            ===============================
-            Uptime Bar
-            ===============================
-            */
-
-            $value = $uptimeData[$i] ?? 0;
-            $barHeight = ($value / $maxScale) * $chartHeight;
-
-            $x1 = $groupX + 2 * ($barWidth + $barGap);
-            $y1 = $baseY - $barHeight;
-            $x2 = $x1 + $barWidth;
-
-            imagefilledrectangle($image, $x1, $y1, $x2, $baseY, $green);
-
-            imagestring(
-                $image,
-                1,
-                $x1,
-                $y1 - 12,
-                round($value, 1) . '%',
-                $black
-            );
+        // ── Legend ───────────────────────────────────────────────────────────
+        $legend = [
+            ['Downtime', $redD, $redL],
+            ['Idletime', $yelD, $yelL],
+            ['Uptime',   $grnD, $grnL],
+        ];
+        $lx = $pL + 20;
+        $ly = 38;
+        foreach ($legend as [$lTxt, $lC, $lCL]) {
+            imagefilledrectangle($img, $lx, $ly - 16, $lx + 24, $ly + 2, $lC);
+            imagefilledrectangle($img, $lx, $ly - 16, $lx + 5,  $ly + 2, $lCL);
+            if ($ttf) {
+                imagettftext($img, 14, 0, $lx + 30, $ly, $labelC, $fontReg, $lTxt);
+                $bx = imagettfbbox(14, 0, $fontReg, $lTxt);
+                $lx += abs($bx[4] - $bx[0]) + 55;
+            } else {
+                imagestring($img, 2, $lx + 30, $ly - 16, $lTxt, $labelC);
+                $lx += strlen($lTxt) * imagefontwidth(2) + 55;
+            }
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Legend
-        |--------------------------------------------------------------------------
-        */
-
-        $legendY = 30;
-
-        imagefilledrectangle(
-            $image,
-            $padding,
-            $legendY - 5,
-            $padding + 12,
-            $legendY + 5,
-            $red
-        );
-
-        imagestring(
-            $image,
-            2,
-            $padding + 15,
-            $legendY - 5,
-            'Downtime',
-            $black
-        );
-
-        imagefilledrectangle(
-            $image,
-            $padding + 100,
-            $legendY - 5,
-            $padding + 112,
-            $legendY + 5,
-            $yellow
-        );
-
-        imagestring(
-            $image,
-            2,
-            $padding + 115,
-            $legendY - 5,
-            'Idletime',
-            $black
-        );
-
-        imagefilledrectangle(
-            $image,
-            $padding + 200,
-            $legendY - 5,
-            $padding + 212,
-            $legendY + 5,
-            $green
-        );
-
-        imagestring(
-            $image,
-            2,
-            $padding + 215,
-            $legendY - 5,
-            'Uptime',
-            $black
-        );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Save Image
-        |--------------------------------------------------------------------------
-        */
-
+        // ── Save ─────────────────────────────────────────────────────────────
         $tempDir = storage_path('app/temp');
-
         if (!file_exists($tempDir)) {
             mkdir($tempDir, 0755, true);
         }
-
-        $tempFile = $tempDir . '/chart_' . uniqid() . '.png';
-
-        imagepng($image, $tempFile, 9);
-
-        imagedestroy($image);
+        $tempFile = $tempDir . '/' . $filePrefix . uniqid() . '.png';
+        imagepng($img, $tempFile, 6);
+        imagedestroy($img);
 
         return $tempFile;
     }
 
+    /**
+     * Generate a compact single-group bar chart for the All Units Summary panel.
+     * Delegates to buildBarChart() with simulatedGroups=5 so bar width is
+     * pixel-identical to one unit's group in the main Machine Performance chart.
+     */
+    private function generateSummaryChart(float $downtime, float $idletime, float $uptime): ?string
+    {
+        // Canvas matched to a 24%-wide PDF column — tall enough to see bars clearly
+        $W  = 800;
+        $H  = 600;
+        $pL = 110;
+        $pR = 40;
+        $pT = 50;
+        $pB = 110;
+
+        $chartW  = $W - $pL - $pR;  // 650
+        $chartH  = $H - $pT - $pB;  // 390
+        $maxScale = 70;
+
+        $fontBold = base_path('vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf');
+        $fontReg  = base_path('vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf');
+        $ttf      = file_exists($fontBold) && function_exists('imagettftext');
+
+        $img = imagecreatetruecolor($W, $H);
+        imageantialias($img, true);
+
+        // Same light palette as buildBarChart
+        $bg     = imagecolorallocate($img, 255, 255, 255);
+        $gridC  = imagecolorallocate($img, 220, 225, 232);
+        $axisC  = imagecolorallocate($img, 160, 170, 185);
+        $labelC = imagecolorallocate($img,  50,  60,  75);
+        $titleC = imagecolorallocate($img,  20,  40,  80);
+        $valC   = imagecolorallocate($img,  20,  20,  20);
+
+        $redD  = imagecolorallocate($img, 210,  45,  60);
+        $redL  = imagecolorallocate($img, 235, 100, 115);
+        $yelD  = imagecolorallocate($img, 210, 150,   0);
+        $yelL  = imagecolorallocate($img, 245, 195,  40);
+        $grnD  = imagecolorallocate($img,  25, 145,  65);
+        $grnL  = imagecolorallocate($img,  70, 195, 105);
+
+        imagefill($img, 0, 0, $bg);
+
+        // Grid
+        for ($i = 0; $i <= 5; $i++) {
+            $pct = ($i * $maxScale) / 5;
+            $y   = (int)($pT + $chartH - ($chartH * $pct / $maxScale));
+            imageline($img, $pL, $y, $pL + $chartW, $y, $gridC);
+            $yLbl = round($pct) . '%';
+            if ($ttf) {
+                $bx = imagettfbbox(13, 0, $fontReg, $yLbl);
+                $lw = abs($bx[4] - $bx[0]);
+                imagettftext($img, 13, 0, $pL - $lw - 10, $y + 5, $labelC, $fontReg, $yLbl);
+            } else {
+                imagestring($img, 2, 5, $y - 6, $yLbl, $labelC);
+            }
+        }
+        imageline($img, $pL, $pT, $pL, $pT + $chartH, $axisC);
+        imageline($img, $pL, $pT + $chartH, $pL + $chartW, $pT + $chartH, $axisC);
+
+        // Bars — 3 bars centred, comfortably filling the chart area
+        // slotW = 55% of chartW so bars are nicely proportioned, not too fat
+        $slotW  = (int)($chartW * 0.55);
+        $barW   = (int)($slotW / 3.2);
+        $barGap = (int)($slotW * 0.045);
+        $baseY  = $pT + $chartH;
+        $groupX = $pL + (int)(($chartW - $slotW) / 2);  // centre the group
+
+        // X label
+        $lbl = 'All Units';
+        if ($ttf) {
+            $bx = imagettfbbox(14, 0, $fontReg, $lbl);
+            $lw = abs($bx[4] - $bx[0]);
+            imagettftext($img, 14, 0, $groupX + (int)($slotW / 2) - (int)($lw / 2), $baseY + 52, $labelC, $fontReg, $lbl);
+        } else {
+            imagestring($img, 3, $groupX + (int)($slotW / 2) - strlen($lbl) * 3, $H - 38, $lbl, $labelC);
+        }
+
+        $drawBar = function (int $bx1, float $val, $cM, $cL) use (
+            $img, $barW, $baseY, $chartH, $maxScale, $ttf, $fontBold, $valC
+        ) {
+            if ($val <= 0) return;
+            $bh  = (int)(($val / $maxScale) * $chartH);
+            $by1 = $baseY - $bh;
+            imagefilledrectangle($img, $bx1, $by1, $bx1 + $barW, $baseY, $cM);
+            imagefilledrectangle($img, $bx1, $by1, $bx1 + 5, $baseY, $cL);
+            $vLbl = round($val, 1) . '%';
+            if ($ttf) {
+                $vb = imagettfbbox(15, 0, $fontBold, $vLbl);
+                $vw = abs($vb[4] - $vb[0]);
+                imagettftext($img, 15, 0, (int)($bx1 + ($barW - $vw) / 2), $by1 - 10, $valC, $fontBold, $vLbl);
+            } else {
+                imagestring($img, 2, $bx1, $by1 - 16, $vLbl, $valC);
+            }
+        };
+
+        $drawBar($groupX,                          $downtime, $redD, $redL);
+        $drawBar($groupX + $barW + $barGap,        $idletime, $yelD, $yelL);
+        $drawBar($groupX + 2 * ($barW + $barGap),  $uptime,   $grnD, $grnL);
+
+        // Legend
+        $items = [['Downtime',$redD,$redL],['Idletime',$yelD,$yelL],['Uptime',$grnD,$grnL]];
+        $lx = $pL + 10;
+        $ly = 38;
+        foreach ($items as [$lTxt, $lC, $lCL]) {
+            imagefilledrectangle($img, $lx, $ly - 14, $lx + 20, $ly + 2, $lC);
+            imagefilledrectangle($img, $lx, $ly - 14, $lx + 5,  $ly + 2, $lCL);
+            if ($ttf) {
+                imagettftext($img, 12, 0, $lx + 26, $ly, $labelC, $fontReg, $lTxt);
+                $bx = imagettfbbox(12, 0, $fontReg, $lTxt);
+                $lx += abs($bx[4] - $bx[0]) + 38;
+            } else {
+                imagestring($img, 2, $lx + 26, $ly - 14, $lTxt, $labelC);
+                $lx += strlen($lTxt) * imagefontwidth(2) + 38;
+            }
+        }
+
+        $tempDir = storage_path('app/temp');
+        if (!file_exists($tempDir)) mkdir($tempDir, 0755, true);
+        $tempFile = $tempDir . '/summary_chart_' . uniqid() . '.png';
+        imagepng($img, $tempFile, 6);
+        imagedestroy($img);
+
+        return $tempFile;
+    }
 }

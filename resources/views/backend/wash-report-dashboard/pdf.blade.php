@@ -592,13 +592,39 @@
     </tr>
     </table>
 
-    <!-- 4. CAPP Chart -->
-    <div style="width: 100%; margin-top: 5px; text-align: center; page-break-inside: avoid; page-break-before: auto;">
+    <!-- 4. CAPP Chart (left) + All Units Summary chart (right) -->
+    <div style="width: 100%; margin-top: 5px; page-break-inside: avoid; page-break-before: auto;">
         @if (isset($chartPath) && file_exists($chartPath))
-        <div style="text-align: center; margin: 0 auto; width: 100%; page-break-inside: avoid;">
-            <img src="{{ $chartPath }}" alt="CAPP Chart"
-                style="max-width: 100%; height: auto; max-height: 180px; width: auto; display: block; margin: 0 auto; border: 1px solid #ccc; image-rendering: auto;">
-        </div>
+        <table style="width: 100%; border: 0; border-collapse: collapse; page-break-inside: avoid;">
+            <tr>
+                <td style="width: 76%; vertical-align: top; padding: 0 5px 0 0; border: 0;">
+                    <span class="section-title" style="background-color: #93c8fdce; text-align: center; display: block;">Machine Performance</span>
+                    <img src="{{ $chartPath }}" alt="CAPP Chart"
+                        style="width: 100%; height: 135px; border: 1px solid #ccc; display: block;">
+                </td>
+                <td style="width: 24%; vertical-align: top; padding: 0 0 0 5px; border: 0;">
+                    <span class="section-title" style="background-color: #93c8fdce; text-align: center; display: block;">
+                        All Units Summary ({{ $machinePerfTotals['units'] ?? '' }} Units)
+                    </span>
+                    @if (isset($summaryChartPath) && file_exists($summaryChartPath))
+                    <img src="{{ $summaryChartPath }}" alt="All Units Summary"
+                        style="width: 100%; height: 135px; border: 1px solid #ccc; display: block;">
+                    @endif
+                </td>
+            </tr>
+        </table>
+        @elseif (isset($summaryChartPath) && file_exists($summaryChartPath))
+        <table style="width: 100%; border: 0; border-collapse: collapse;">
+            <tr>
+                <td style="width: 100%; vertical-align: top; border: 0; text-align: center;">
+                    <span class="section-title" style="background-color: #93c8fdce; text-align: center; display: block;">
+                        All Units Summary ({{ $machinePerfTotals['units'] ?? '' }} Units)
+                    </span>
+                    <img src="{{ $summaryChartPath }}" alt="All Units Summary"
+                        style="width: 40%; height: 130px; border: 1px solid #ccc; display: inline-block;">
+                </td>
+            </tr>
+        </table>
         @else
         <table class="data-table"
             style="width: 70%; margin: 0 auto; border: 0.5px solid #999; page-break-inside: avoid;">
