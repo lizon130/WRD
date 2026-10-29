@@ -454,20 +454,18 @@
                     </div>
                     <div class="card-body">
                         <div class="row">
-                            <div class="col-lg-10">
+                            <div class="col-lg-9">
                                 <div style="height: 450px;">
                                     <canvas id="cappChart"></canvas>
                                 </div>
                             </div>
-                            <div class="col-lg-2">
-                                <div class="info-panel">
-                                    <div class="info-panel-header">
-                                        <i class="fa-regular fa-calendar text-primary"></i>
-                                        <h6 class="mb-0">Period Info</h6>
+                            <div class="col-lg-3">
+                                <div style="border: 1px solid #dee2e6; border-radius: 6px; padding: 8px; background: #ffffff; height: 100%;">
+                                    <div style="text-align: center; font-weight: bold; font-size: 13px; color: #1a2a3a; margin-bottom: 4px;">
+                                        All Units Summary <span style="font-weight: normal; font-size: 11px; color: #6c757d;">(<span id="cappUnits">0</span> Units)</span>
                                     </div>
-                                    <div class="info-panel-body">
-                                        <p class="mb-2"><strong>From:</strong> <span id="cappFrom" class="small"></span></p>
-                                        <p class="mb-0"><strong>To:</strong> <span id="cappTo" class="small"></span></p>
+                                    <div style="height: 390px;">
+                                        <canvas id="cappSummaryChart"></canvas>
                                     </div>
                                 </div>
                             </div>
@@ -2200,8 +2198,6 @@
                 },
                 success: function(response) {
                     if (response.success) {
-                        $('#cappFrom').text(response.period.from || '-');
-                        $('#cappTo').text(response.period.to || '-');
                         if (window.cappChart instanceof Chart) window.cappChart.destroy();
                         const ctx = document.getElementById('cappChart').getContext('2d');
                         window.cappChart = new Chart(ctx, {
@@ -2246,9 +2242,105 @@
                                 unitCount++;
                             });
                             if (unitCount > 0) {
-                                $('#uptimeValueDetail').text((totalUptime / unitCount).toFixed(2));
-                                $('#idletimeValueDetail').text((totalIdletime / unitCount).toFixed(2));
-                                $('#downtimeValueDetail').text((totalDowntime / unitCount).toFixed(2));
+                                const avgUptime = totalUptime / unitCount;
+                                const avgIdletime = totalIdletime / unitCount;
+                                const avgDowntime = totalDowntime / unitCount;
+
+                                $('#uptimeValueDetail').text(avgUptime.toFixed(2));
+                                $('#idletimeValueDetail').text(avgIdletime.toFixed(2));
+                                $('#downtimeValueDetail').text(avgDowntime.toFixed(2));
+
+                                $('#cappUnits').text(unitCount);
+
+                                // All Units Summary bar chart (same style as PDF)
+                                if (window.cappSummaryChart instanceof Chart) window.cappSummaryChart.destroy();
+                                const sctx = document.getElementById('cappSummaryChart').getContext('2d');
+                                window.cappSummaryChart = new Chart(sctx, {
+                                    type: 'bar',
+                                    data: {
+                                        labels: ['All Units'],
+                                        datasets: [{
+                                            label: 'Downtime',
+                                            data: [avgDowntime],
+                                            backgroundColor: '#D22D3C',
+                                            borderWidth: 0
+                                        }, {
+                                            label: 'Idletime',
+                                            data: [avgIdletime],
+                                            backgroundColor: '#D29600',
+                                            borderWidth: 0
+                                        }, {
+                                            label: 'Uptime',
+                                            data: [avgUptime],
+                                            backgroundColor: '#199141',
+                                            borderWidth: 0
+                                        }]
+                                    },
+                                    options: {
+                                        responsive: true,
+                                        maintainAspectRatio: false,
+                                        scales: {
+                                            y: {
+                                                beginAtZero: true,
+                                                max: 70,
+                                                title: {
+                                                    display: true,
+                                                    text: 'Percentage (%)',
+                                                    font: {
+                                                        size: 10
+                                                    }
+                                                },
+                                                ticks: {
+                                                    callback: function(value) {
+                                                        return value + '%';
+                                                    },
+                                                    font: {
+                                                        size: 10
+                                                    }
+                                                }
+                                            },
+                                            x: {
+                                                ticks: {
+                                                    font: {
+                                                        size: 11
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        plugins: {
+                                            legend: {
+                                                position: 'top',
+                                                labels: {
+                                                    boxWidth: 12,
+                                                    font: {
+                                                        size: 10
+                                                    }
+                                                }
+                                            },
+                                            tooltip: {
+                                                callbacks: {
+                                                    label: function(context) {
+                                                        return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + '%';
+                                                    }
+                                                }
+                                            },
+                                            datalabels: {
+                                                align: 'end',
+                                                anchor: 'end',
+                                                color: '#141414',
+                                                font: {
+                                                    weight: 'bold',
+                                                    size: 11
+                                                },
+                                                formatter: function(value) {
+                                                    return value > 0 ? value.toFixed(2) + '%' : '';
+                                                }
+                                            }
+                                        },
+                                        barPercentage: 0.75,
+                                        categoryPercentage: 0.65
+                                    }
+                                });
                             }
                         }
                     }
