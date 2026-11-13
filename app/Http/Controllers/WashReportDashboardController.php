@@ -3554,12 +3554,21 @@ class WashReportDashboardController extends Controller
             $cappData = $cappResponse->getData(true);
             $chartPath = null;
             $machinePerfTotals = null;
+            $perfLabels = [];
+            $perfDowntime = [];
+            $perfIdletime = [];
+            $perfUptime = [];
 
             if (!empty($cappData['success'])) {
                 $labels = $cappData['chart_data']['labels'];
                 $downtimeData = $cappData['chart_data']['datasets'][0]['data'];
                 $idletimeData = $cappData['chart_data']['datasets'][1]['data'];
                 $uptimeData = $cappData['chart_data']['datasets'][2]['data'];
+
+                $perfLabels = $labels;
+                $perfDowntime = array_map(fn ($v) => (float) $v, $downtimeData);
+                $perfIdletime = array_map(fn ($v) => (float) $v, $idletimeData);
+                $perfUptime = array_map(fn ($v) => (float) $v, $uptimeData);
 
                 // All-units combined (average of per-unit percentages)
                 $perfRows = !empty($cappData['unit_data'])
@@ -3616,7 +3625,11 @@ class WashReportDashboardController extends Controller
                 'dryerTotals' => $dryerTotals,
                 'chartPath' => $chartPath,
                 'summaryChartPath' => $summaryChartPath,
-                'machinePerfTotals' => $machinePerfTotals
+                'machinePerfTotals' => $machinePerfTotals,
+                'perfLabels' => $perfLabels,
+                'perfDowntime' => $perfDowntime,
+                'perfIdletime' => $perfIdletime,
+                'perfUptime' => $perfUptime
             ]);
 
             $pdf->setPaper('A4', 'landscape');
